@@ -1,0 +1,8 @@
+2026-04-12 23:22:41,312 [INFO] Session created | Account: CFD | Currency: AED | Mode: DEMO
+2026-04-12 23:22:41,512 [INFO] ============================================================
+2026-04-12 23:22:41,512 [INFO]   US500 19:05 IST Runner — STARTED
+2026-04-12 23:22:41,512 [INFO]   Account: CFD | Currency: AED | Mode: DEMO
+2026-04-12 23:22:41,513 [INFO]   Balance: AED 4,000.00
+2026-04-12 23:22:41,513 [INFO] ============================================================
+2026-04-12 23:22:41,513 [INFO]   [DAY] New IST day 2026-04-13 — resetting state
+2026-04-12 23:22:41,513 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h

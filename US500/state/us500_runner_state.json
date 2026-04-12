@@ -1,0 +1,14 @@
+{
+  "date": "2026-04-13",
+  "candle_high": null,
+  "candle_low": null,
+  "candle_range": null,
+  "trades_today": 0,
+  "t1_direction": null,
+  "t1_sl_hit": false,
+  "t1_tp_hit": false,
+  "active_deal_id": null,
+  "active_tp": null,
+  "active_dir": null,
+  "done_for_day": false
+}
