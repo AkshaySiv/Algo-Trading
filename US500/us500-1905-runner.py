@@ -26,10 +26,12 @@ from capitalcom_api import CapitalComAPI
 
 # ── Config ────────────────────────────────────────────────────────────────────
 EPIC          = "US500"
-RISK_PCT      = 0.01        # 1% per trade
+FIXED_SL_AED  = 50.0        # fixed risk per trade in AED
+FIXED_TP_AED  = 150.0       # fixed profit target in AED (1:3)
 RR_RATIO      = 3.0         # 1:3
 STOP_BUFFER   = 0.1         # points above/below candle H/L for entry
-CHECK_EVERY   = 30          # seconds between scans
+CHECK_EVERY   = 30          # seconds between scans (pre-candle)
+CHECK_FAST    = 0.5         # seconds between scans (post-candle, waiting for breakout)
 PIP_VALUE_USD = 1.0         # US500: 1pt = $1/unit
 USD_TO_AED    = 3.67
 STATE_FILE    = "state/us500_runner_state.json"
@@ -97,24 +99,28 @@ def fresh_state():
         "candle_range":   None,
         "trades_today":   0,
         "t1_direction":   None,
+        "t2_direction":   None,
         "t1_sl_hit":      False,
         "t1_tp_hit":      False,
+        "t2_tp_hit":      False,
+        "t2_sl_hit":      False,
         "active_deal_id": None,
         "active_tp":      None,   # exact TP level for current trade
+        "active_sl":      None,   # exact SL level for current trade
         "active_dir":     None,   # direction of current trade
         "done_for_day":   False,
     }
 
 
 # ── Candle fetch ──────────────────────────────────────────────────────────────
-def fetch_1905_candle(api: CapitalComAPI) -> Optional[dict]:
+def fetch_1905_candle(api: CapitalComAPI, candle_date_str: str) -> Optional[dict]:
     """
     Fetch the 19:05 IST (13:35 UTC) 5-min candle directly.
     Uses date-range API call: from=13:33 to=13:38 → only one bar returned.
+    candle_date_str: IST date string "YYYY-MM-DD" — the candle UTC date matches this.
     Returns {high, low, close} or None if not available yet.
     """
-    now_utc = datetime.now(timezone.utc)
-    today   = now_utc.date()
+    today   = datetime.strptime(candle_date_str, "%Y-%m-%d").date()
     ch      = candle_utc_hour()
 
     # Build exact window: XX:35:00 to XX:39:59 UTC today (DST-adjusted)
@@ -162,9 +168,8 @@ def fetch_1905_candle(api: CapitalComAPI) -> Optional[dict]:
 
 
 # ── Position sizing ───────────────────────────────────────────────────────────
-def compute_size(balance: float, sl_distance: float) -> float:
-    risk_aed   = balance * RISK_PCT
-    size       = risk_aed / (sl_distance * PIP_VALUE_USD * USD_TO_AED)
+def compute_size(sl_distance: float) -> float:
+    size = FIXED_SL_AED / (sl_distance * PIP_VALUE_USD * USD_TO_AED)
     return round(max(0.1, round(size, 1)), 1)
 
 
@@ -249,24 +254,29 @@ def run():
                 state = fresh_state()
                 save_state(state)
 
-            # ── Done for day — sleep until next day ───────────────────────
-            if state["done_for_day"]:
-                log.debug("  [DAY] Done for today — waiting for tomorrow")
-                time.sleep(CHECK_EVERY)
-                continue
-
             # ── Weekend guard (market closed Sat & Sun UTC) ───────────
             if now_utc.weekday() >= 5:  # 5=Saturday, 6=Sunday
                 log.info(f"  [WEEKEND] Market closed ({now_utc.strftime('%A')}) — sleeping 1h")
                 time.sleep(3600)
                 continue
 
+            # ── Done for day — sleep until next day ───────────────────────
+            if state["done_for_day"]:
+                log.debug("  [DAY] Done for today — waiting for tomorrow")
+                time.sleep(CHECK_EVERY)
+                continue
+
             # ── Step 1: Capture 19:05 IST candle (after 13:40 UTC) ───────
             if state["candle_high"] is None:
                 # Only attempt after candle has closed (DST-adjusted)
+                # IMPORTANT: use the IST state date (not now_utc.date()) so that
+                # after midnight-IST rollover (e.g. 22:30 UTC Apr 14 → IST Apr 15)
+                # we wait for Apr 15 13:40 UTC, not the already-passed Apr 14 13:40 UTC.
                 ch = candle_utc_hour()
-                candle_close_utc = now_utc.replace(
-                    hour=ch, minute=40, second=0, microsecond=0)
+                state_date = datetime.strptime(state["date"], "%Y-%m-%d")
+                candle_close_utc = datetime(
+                    state_date.year, state_date.month, state_date.day,
+                    ch, 40, 0, tzinfo=timezone.utc)
                 if now_utc < candle_close_utc:
                     log.info(f"  [WAIT] Waiting for 19:05 IST candle to close | "
                              f"Now={now_ist.strftime('%H:%M')} IST")
@@ -280,7 +290,7 @@ def run():
                 state["trades_today"]   = 0
                 save_state(state)
 
-                candle = fetch_1905_candle(api)
+                candle = fetch_1905_candle(api, state["date"])
                 if candle is None:
                     log.info("  [WAIT] Candle not available yet — retrying")
                     time.sleep(30)
@@ -314,21 +324,26 @@ def run():
                         current = (H + L) / 2  # midpoint fallback
 
                     active_tp  = state.get("active_tp")
+                    active_sl  = state.get("active_sl")
                     active_dir = state.get("active_dir")
-                    if active_tp and active_dir == "BUY":
-                        tp_hit = current >= active_tp * 0.999  # within 0.1% of TP
-                    elif active_tp and active_dir == "SELL":
-                        tp_hit = current <= active_tp * 1.001
+                    if active_tp and active_sl and active_dir == "BUY":
+                        # price closer to TP (above) than SL (below) → TP hit
+                        tp_hit = (active_tp - current) <= (current - active_sl)
+                    elif active_tp and active_sl and active_dir == "SELL":
+                        # price closer to TP (below) than SL (above) → TP hit
+                        tp_hit = (current - active_tp) <= (active_sl - current)
                     else:
                         tp_hit = False
 
                     state["active_deal_id"] = None
                     state["active_tp"]      = None
+                    state["active_sl"]      = None
                     state["active_dir"]     = None
 
                     if state["trades_today"] >= 2:
                         # T2 just closed (TP or SL) — done for day either way
-                        state["t1_tp_hit"]    = tp_hit
+                        state["t2_tp_hit"]    = tp_hit
+                        state["t2_sl_hit"]    = not tp_hit
                         state["done_for_day"] = True
                         save_state(state)
                         result = "TP ✅" if tp_hit else "SL ❌"
@@ -368,83 +383,89 @@ def run():
             # ── Step 5: Get current price and decide entry ─────────────────
             try:
                 cp      = api.get_current_price(EPIC)
-                current = cp.get("bid", 0)
+                bid     = cp.get("bid", 0)
+                offer   = cp.get("offer", bid)   # ASK — BUY fills at offer
             except Exception as e:
                 log.warning(f"  [PRICE] Failed to get price: {e}")
-                time.sleep(CHECK_EVERY)
+                time.sleep(CHECK_FAST)
                 continue
-
-            acc     = api.get_account_info()
-            balance = acc.get("balance", {}).get("balance", 0)
 
             # ── Step 6: T1 entry (first trade) ────────────────────────────
             if state["trades_today"] == 0:
-                if current > H + STOP_BUFFER:
-                    # BUY breakout — risk 1%, TP = entry + 3×sl_dist
-                    sl      = round(L, 2)
-                    sl_dist = round(current - sl, 2)
-                    size    = compute_size(balance, sl_dist)
-                    tp      = round(current + RR_RATIO * sl_dist, 2)
+                if bid > H + STOP_BUFFER:
+                    # BUY breakout — use offer (ASK) for sl_dist/TP → true 1:3 from fill
+                    sl      = round(L - STOP_BUFFER, 2)
+                    sl_dist = round(offer - sl, 2)
+                    size    = compute_size(sl_dist)
+                    tp      = round(offer + RR_RATIO * sl_dist, 2)
                     deal_id = open_trade(api, "BUY", sl, tp, size, "T1 BUY breakout")
                     if deal_id:
                         state["trades_today"]   = 1
                         state["t1_direction"]   = "BUY"
                         state["active_deal_id"] = deal_id
                         state["active_tp"]      = tp
+                        state["active_sl"]      = sl
                         state["active_dir"]     = "BUY"
                         save_state(state)
 
-                elif current < L - STOP_BUFFER:
-                    # SELL breakout — risk 1%, TP = entry - 3×sl_dist
-                    sl      = round(H, 2)
-                    sl_dist = round(sl - current, 2)
-                    size    = compute_size(balance, sl_dist)
-                    tp      = round(current - RR_RATIO * sl_dist, 2)
+                elif bid < L - STOP_BUFFER:
+                    # SELL breakout — use bid (fills at bid) → true 1:3 from fill
+                    sl      = round(H + STOP_BUFFER, 2)
+                    sl_dist = round(sl - bid, 2)
+                    size    = compute_size(sl_dist)
+                    tp      = round(bid - RR_RATIO * sl_dist, 2)
                     deal_id = open_trade(api, "SELL", sl, tp, size, "T1 SELL breakout")
                     if deal_id:
                         state["trades_today"]   = 1
                         state["t1_direction"]   = "SELL"
                         state["active_deal_id"] = deal_id
                         state["active_tp"]      = tp
+                        state["active_sl"]      = sl
                         state["active_dir"]     = "SELL"
                         save_state(state)
 
                 else:
-                    log.info(f"  [WAIT] Price {current} inside range "
+                    log.info(f"  [WAIT] Price {bid} inside range "
                              f"[{L-STOP_BUFFER:.1f} – {H+STOP_BUFFER:.1f}] — waiting")
+                    time.sleep(CHECK_FAST)
+                    continue
 
             # ── Step 7: T2 reversal (after T1 SL hit) ─────────────────────
             elif state["trades_today"] == 1 and state["t1_sl_hit"]:
                 t1 = state["t1_direction"]
 
                 if t1 == "BUY":
-                    # T1 BUY stopped at L → T2 SELL anchored to L, SL=H, TP=L-3R
-                    sl      = round(H, 2)
-                    tp      = round(L - RR_RATIO * R, 2)
-                    size    = compute_size(balance, R)
+                    # T1 BUY stopped at L → T2 SELL, use bid (sells fill at bid)
+                    sl      = round(H + STOP_BUFFER, 2)
+                    sl_dist = round(sl - bid, 2)
+                    tp      = round(bid - RR_RATIO * sl_dist, 2)
+                    size    = compute_size(sl_dist)
                     deal_id = open_trade(api, "SELL", sl, tp, size,
                                         "T2 REVERSAL SELL (T1 BUY SL hit)")
                     if deal_id:
                         state["trades_today"]   = 2
-                        state["t1_direction"]   = "SELL"
+                        state["t2_direction"]   = "SELL"
                         state["active_deal_id"] = deal_id
                         state["active_tp"]      = tp
+                        state["active_sl"]      = sl
                         state["active_dir"]     = "SELL"
                         state["t1_sl_hit"]      = False
                         save_state(state)
 
                 elif t1 == "SELL":
-                    # T1 SELL stopped at H → T2 BUY anchored to H, SL=L, TP=H+3R
-                    sl      = round(L, 2)
-                    tp      = round(H + RR_RATIO * R, 2)
-                    size    = compute_size(balance, R)
+                    # T1 SELL stopped at H → T2 BUY, use offer (buys fill at offer)
+                    sl      = round(L - STOP_BUFFER, 2)
+                    sl_dist = round(offer - sl, 2)
+                    tp      = round(offer + RR_RATIO * sl_dist, 2)
+                    size    = compute_size(sl_dist)
                     deal_id = open_trade(api, "BUY", sl, tp, size,
                                         "T2 REVERSAL BUY (T1 SELL SL hit)")
                     if deal_id:
                         state["trades_today"]   = 2
-                        state["t1_direction"]   = "BUY"
+                        state["t2_direction"]   = "BUY"
                         state["active_deal_id"] = deal_id
                         state["active_tp"]      = tp
+                        state["active_sl"]      = sl
                         state["active_dir"]     = "BUY"
                         state["t1_sl_hit"]      = False
                         save_state(state)
@@ -452,7 +473,8 @@ def run():
         except Exception as e:
             log.error(f"Cycle error: {e}", exc_info=True)
 
-        time.sleep(CHECK_EVERY)
+        # Fast polling once candle is captured, slow before
+        time.sleep(CHECK_FAST if state.get("candle_high") else CHECK_EVERY)
 
 
 if __name__ == "__main__":
