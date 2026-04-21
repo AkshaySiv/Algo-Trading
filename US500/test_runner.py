@@ -23,12 +23,14 @@ from capitalcom_api import CapitalComAPI
 load_dotenv()
 
 # ── Config (must match runner) ─────────────────────────────────────────────────
-EPIC          = "US500"
-RISK_PCT      = 0.01
-RR_RATIO      = 3.0
-STOP_BUFFER   = 0.1
-PIP_VALUE_USD = 1.0
-USD_TO_AED    = 3.67
+EPIC           = "US500"
+FIXED_SL_AED   = 50.0        # fixed risk per trade in AED — must match runner
+RR_RATIO       = 3.0
+STOP_BUFFER    = 0.1         # points beyond candle H/L for entry trigger
+SL_BUFFER      = 0.0         # extra points beyond candle H/L for SL (0 = SL at exact candle H/L)
+PIP_VALUE_USD  = 1.0
+USD_TO_AED     = 3.67
+START_CAPITAL  = 10_000.0    # starting capital in AED for simulation (set None to use live balance)
 IST           = timezone(timedelta(hours=5, minutes=30))
 
 CAPITAL_API_KEY    = os.getenv('CAPITAL_API_KEY',    '')
@@ -55,9 +57,8 @@ def candle_utc_hour(d: date) -> int:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-def compute_size(balance: float, sl_distance: float) -> float:
-    risk_aed = balance * RISK_PCT
-    size     = risk_aed / (sl_distance * PIP_VALUE_USD * USD_TO_AED)
+def compute_size(sl_distance: float) -> float:
+    size = FIXED_SL_AED / (sl_distance * PIP_VALUE_USD * USD_TO_AED)
     return round(max(0.1, round(size, 1)), 1)
 
 
@@ -82,22 +83,31 @@ def fetch_candle(api, sim_date: date) -> Optional[dict]:
         bars = resp.json().get("prices", [])
         if not bars:
             return None
-        bar = bars[0]
-        h = bar["highPrice"]["bid"]
-        l = bar["lowPrice"]["bid"]
-        c = bar["closePrice"]["bid"]
-        return {"high": h, "low": l, "close": c, "range": round(h - l, 2)}
+        bar   = bars[0]
+        h_bid = bar["highPrice"]["bid"]
+        h_ask = bar["highPrice"].get("ask", h_bid)  # ask high for SELL SL
+        l_bid = bar["lowPrice"]["bid"]
+        c     = bar["closePrice"]["bid"]
+        return {"high": h_bid, "high_ask": h_ask, "low": l_bid,
+                "close": c, "range": round(h_bid - l_bid, 2)}
     except Exception:
         return None
 
 
 def fetch_minute_bars(api, sim_date: date) -> list:
-    """Fetch 5-min bars from candle close UTC to end of day for replay."""
+    """
+    Fetch 5-min bars from candle close UTC through to next day's 13:40 UTC close.
+    Matches live runner: trade runs overnight, closed before next day's fresh candle.
+    """
     ch       = candle_utc_hour(sim_date)
     from_ts  = datetime(sim_date.year, sim_date.month, sim_date.day,
                         ch, 40, 0, tzinfo=timezone.utc)
-    to_ts    = datetime(sim_date.year, sim_date.month, sim_date.day,
-                        23, 59, 59, tzinfo=timezone.utc)
+    # Extend to next day 13:40 UTC — mirrors live runner's overnight close logic
+    next_day  = datetime(sim_date.year, sim_date.month, sim_date.day,
+                         tzinfo=timezone.utc) + timedelta(days=1)
+    ch_next   = candle_utc_hour(next_day.date())
+    to_ts     = datetime(next_day.year, next_day.month, next_day.day,
+                         ch_next, 39, 59, tzinfo=timezone.utc)
     from_str = from_ts.strftime("%Y-%m-%dT%H:%M:%S")
     to_str   = to_ts.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -124,15 +134,16 @@ def simulate_day(api, sim_date: date, balance: float):
         print("  [SKIP] No candle data — market holiday or data unavailable")
         return balance
 
-    H = candle["high"]
-    L = candle["low"]
-    R = candle["range"]
+    H     = candle["high"]       # bid high — used for BUY entry trigger & BUY TP monitor
+    H_ask = candle["high_ask"]   # ask high — used for SELL SL (BUY stop triggers at ask)
+    L     = candle["low"]
+    R     = candle["range"]
     ch         = candle_utc_hour(sim_date)
     ist_min    = 35 + 30  # UTC+5:30 → +5h30m → minute stays 35+30=65 → 05 next hour
     ist_hour   = ch + 5 + (1 if ist_min >= 60 else 0)
     ist_min   %= 60
     candle_ist = f"{ist_hour:02d}:{ist_min:02d} IST"
-    print(f"  [CANDLE] {candle_ist} | H={H}  L={L}  Range={R} pts")
+    print(f"  [CANDLE] {candle_ist} | H={H} (ask={H_ask})  L={L}  Range={R} pts")
     print(f"  [LEVELS] BUY trigger > {H + STOP_BUFFER}  |  SELL trigger < {L - STOP_BUFFER}")
 
     # Fetch 1-min bars for replay
@@ -163,17 +174,20 @@ def simulate_day(api, sim_date: date, balance: float):
         if done_for_day:
             break
 
-        ts       = bar.get("snapshotTimeUTC", bar.get("snapshotTime", "?"))
-        bar_high = bar["highPrice"]["bid"]
-        bar_low  = bar["lowPrice"]["bid"]
-        bar_open = bar["openPrice"]["bid"]
+        ts           = bar.get("snapshotTimeUTC", bar.get("snapshotTime", "?"))
+        bar_high_bid = bar["highPrice"]["bid"]
+        bar_high_ask = bar["highPrice"].get("ask", bar["highPrice"]["bid"])
+        bar_low_bid  = bar["lowPrice"]["bid"]
+        bar_open     = bar["openPrice"]["bid"]
 
         # ── Monitor active trade ───────────────────────────────────────────────
+        # SELL SL is a BUY stop → triggers at ask; BUY SL is a SELL stop → triggers at bid
+        # TP for both sides monitored at bid (Capital.com TP closes at bid for SELL, bid for BUY)
         if active_entry is not None:
-            sl_hit = (active_dir == "BUY"  and bar_low  <= active_sl) or \
-                     (active_dir == "SELL" and bar_high >= active_sl)
-            tp_hit = (active_dir == "BUY"  and bar_high >= active_tp) or \
-                     (active_dir == "SELL" and bar_low  <= active_tp)
+            sl_hit = (active_dir == "BUY"  and bar_low_bid  <= active_sl) or \
+                     (active_dir == "SELL" and bar_high_bid >= active_sl)
+            tp_hit = (active_dir == "BUY"  and bar_high_bid >= active_tp) or \
+                     (active_dir == "SELL" and bar_low_bid  <= active_tp)
 
             # If both hit in same bar, determine order by open price direction
             if sl_hit and tp_hit:
@@ -213,8 +227,8 @@ def simulate_day(api, sim_date: date, balance: float):
             continue  # no new entries, but monitoring above still runs each bar
 
         if trades_today == 0:
-            sell_triggered = bar_low  < L - STOP_BUFFER
-            buy_triggered  = bar_high > H + STOP_BUFFER
+            sell_triggered = bar_low_bid  < L - STOP_BUFFER
+            buy_triggered  = bar_high_bid > H + STOP_BUFFER
 
             if sell_triggered and buy_triggered:
                 # Both breached in same bar — use open price to decide direction
@@ -222,12 +236,12 @@ def simulate_day(api, sim_date: date, balance: float):
                 buy_triggered  = not sell_triggered
 
             if sell_triggered:
-                entry  = round(L - STOP_BUFFER, 2)
-                sl     = round(H, 2)
+                entry   = round(L - STOP_BUFFER, 2)
+                sl      = round(H + SL_BUFFER, 2)         # SELL SL = candle bid high
                 sl_dist = round(sl - entry, 2)
-                size   = compute_size(balance, sl_dist)
-                tp     = round(entry - RR_RATIO * sl_dist, 2)
-                label  = "T1 SELL"
+                size    = compute_size(sl_dist)
+                tp      = round(entry - RR_RATIO * sl_dist, 2)
+                label   = "T1 SELL"
                 t1_direction = "SELL"
                 active_entry = entry
                 active_sl    = sl
@@ -240,12 +254,12 @@ def simulate_day(api, sim_date: date, balance: float):
                     f"Size={size}  SL-dist={sl_dist:.2f}pts  |  ts={ts}")
 
             elif buy_triggered:
-                entry  = round(H + STOP_BUFFER, 2)
-                sl     = round(L, 2)
+                entry   = round(H + STOP_BUFFER, 2)
+                sl      = round(L - SL_BUFFER, 2)         # BUY SL = candle bid low
                 sl_dist = round(entry - sl, 2)
-                size   = compute_size(balance, sl_dist)
-                tp     = round(entry + RR_RATIO * sl_dist, 2)
-                label  = "T1 BUY"
+                size    = compute_size(sl_dist)
+                tp      = round(entry + RR_RATIO * sl_dist, 2)
+                label   = "T1 BUY"
                 t1_direction = "BUY"
                 active_entry = entry
                 active_sl    = sl
@@ -259,26 +273,38 @@ def simulate_day(api, sim_date: date, balance: float):
 
         elif trades_today == 1 and t1_sl_hit:
             if t1_direction == "BUY":
-                # T1 BUY stopped at L → T2 SELL anchored to L, SL=H, TP=L-3R
-                active_entry = L
-                active_sl    = round(H, 2)
-                active_tp    = round(L - RR_RATIO * R, 2)
+                # T1 BUY stopped at L-buf → T2 SELL, entry at reversal price, SL above ask high
+                t2_entry  = round(L - STOP_BUFFER, 2)     # price where T1 BUY SL was hit
+                t2_sl     = round(H + SL_BUFFER, 2)       # SELL SL = candle bid high
+                t2_sldist = round(t2_sl - t2_entry, 2)
+                t2_tp     = round(t2_entry - RR_RATIO * t2_sldist, 2)
+                active_entry = t2_entry
+                active_sl    = t2_sl
+                active_tp    = t2_tp
                 active_dir   = "SELL"
                 label        = "T2 SELL"
+                active_size  = compute_size(t2_sldist)
+                trade_log.append(
+                    f"  [{label}] Entry={t2_entry:.2f}  SL={t2_sl:.2f}  "
+                    f"TP={t2_tp:.2f}  Size={active_size}  SL-dist={t2_sldist:.2f}pts  |  ts={ts}")
             else:
-                # T1 SELL stopped at H → T2 BUY anchored to H, SL=L, TP=H+3R
-                active_entry = H
-                active_sl    = round(L, 2)
-                active_tp    = round(H + RR_RATIO * R, 2)
+                # T1 SELL stopped at H_ask+buf → T2 BUY, entry at reversal price, SL below bid low
+                t2_entry  = round(H + STOP_BUFFER, 2)     # price where T1 SELL SL was hit
+                t2_sl     = round(L - SL_BUFFER, 2)       # BUY SL = candle bid low
+                t2_sldist = round(t2_entry - t2_sl, 2)
+                t2_tp     = round(t2_entry + RR_RATIO * t2_sldist, 2)
+                active_entry = t2_entry
+                active_sl    = t2_sl
+                active_tp    = t2_tp
                 active_dir   = "BUY"
                 label        = "T2 BUY"
+                active_size  = compute_size(t2_sldist)
+                trade_log.append(
+                    f"  [{label}] Entry={t2_entry:.2f}  SL={t2_sl:.2f}  "
+                    f"TP={t2_tp:.2f}  Size={active_size}  SL-dist={t2_sldist:.2f}pts  |  ts={ts}")
 
-            active_size  = compute_size(balance, R)
             trades_today = 2
             t1_sl_hit    = False
-            trade_log.append(
-                f"  [{label}] Entry={active_entry:.2f}  SL={active_sl:.2f}  "
-                f"TP={active_tp:.2f}  Size={active_size}  SL-dist={R:.2f}pts  |  ts={ts}")
 
     # ── End of day — close any open position at last bar close ─────────────────
     if active_entry is not None:
@@ -349,9 +375,12 @@ def main():
         demo=DEMO_MODE
     )
     api.create_session()
-    acc          = api.get_account_info()
-    start_balance = acc.get("balance", {}).get("balance", 0)
-    balance       = start_balance
+    if START_CAPITAL is not None:
+        start_balance = START_CAPITAL
+    else:
+        acc           = api.get_account_info()
+        start_balance = acc.get("balance", {}).get("balance", 0)
+    balance = start_balance
 
     print(f"\nUS500 19:05 IST — Dry-Run Simulator")
     print(f"Starting balance: AED {balance:,.2f}")

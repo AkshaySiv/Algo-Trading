@@ -29,7 +29,8 @@ EPIC          = "US500"
 FIXED_SL_AED  = 50.0        # fixed risk per trade in AED
 FIXED_TP_AED  = 150.0       # fixed profit target in AED (1:3)
 RR_RATIO      = 3.0         # 1:3
-STOP_BUFFER   = 0.1         # points above/below candle H/L for entry
+STOP_BUFFER   = 0.1         # points beyond candle H/L for entry trigger
+SL_BUFFER     = 0.0         # extra points beyond candle H/L for SL (0 = SL at exact candle H/L)
 CHECK_EVERY   = 30          # seconds between scans (pre-candle)
 CHECK_FAST    = 0.5         # seconds between scans (post-candle, waiting for breakout)
 PIP_VALUE_USD = 1.0         # US500: 1pt = $1/unit
@@ -94,9 +95,10 @@ def candle_utc_hour() -> int:
 def fresh_state():
     return {
         "date":           today_ist(),
-        "candle_high":    None,
-        "candle_low":     None,
-        "candle_range":   None,
+        "candle_high":     None,
+        "candle_high_ask": None,  # ask high — used for SELL SL (BUY stop triggers at ask)
+        "candle_low":      None,
+        "candle_range":    None,
         "trades_today":   0,
         "t1_direction":   None,
         "t2_direction":   None,
@@ -152,15 +154,16 @@ def fetch_1905_candle(api: CapitalComAPI, candle_date_str: str) -> Optional[dict
             return None
 
         # Should be exactly 1 bar
-        bar = bars[0]
-        ts  = bar.get("snapshotTimeUTC", bar.get("snapshotTime", "?"))
-        h   = bar.get("highPrice",  {}).get("bid", 0)
-        l   = bar.get("lowPrice",   {}).get("bid", 0)
-        c   = bar.get("closePrice", {}).get("bid", 0)
-        r   = round(h - l, 2)
+        bar   = bars[0]
+        ts    = bar.get("snapshotTimeUTC", bar.get("snapshotTime", "?"))
+        h_bid = bar.get("highPrice",  {}).get("bid", 0)
+        h_ask = bar.get("highPrice",  {}).get("ask", h_bid)  # ask high for SELL SL
+        l_bid = bar.get("lowPrice",   {}).get("bid", 0)
+        c     = bar.get("closePrice", {}).get("bid", 0)
+        r     = round(h_bid - l_bid, 2)
 
-        log.info(f"  [CANDLE] 19:05 IST bar: ts={ts} | H={h} L={l} Range={r}pts")
-        return {"high": h, "low": l, "close": c, "range": r, "ts": ts}
+        log.info(f"  [CANDLE] 19:05 IST bar: ts={ts} | H={h_bid} (ask={h_ask}) L={l_bid} Range={r}pts")
+        return {"high": h_bid, "high_ask": h_ask, "low": l_bid, "close": c, "range": r, "ts": ts}
 
     except Exception as e:
         log.warning(f"  [CANDLE] Failed to fetch: {e}")
@@ -296,16 +299,18 @@ def run():
                     time.sleep(30)
                     continue
 
-                state["candle_high"]  = candle["high"]
-                state["candle_low"]   = candle["low"]
-                state["candle_range"] = candle["range"]
+                state["candle_high"]     = candle["high"]
+                state["candle_high_ask"] = candle["high_ask"]
+                state["candle_low"]      = candle["low"]
+                state["candle_range"]    = candle["range"]
                 save_state(state)
-                log.info(f"  [CANDLE] Captured ✅ H={candle['high']} "
+                log.info(f"  [CANDLE] Captured ✅ H={candle['high']} (ask={candle['high_ask']}) "
                          f"L={candle['low']} Range={candle['range']}pts")
 
-            H = state["candle_high"]
-            L = state["candle_low"]
-            R = state["candle_range"]
+            H     = state["candle_high"]
+            H_ask = state.get("candle_high_ask", H)  # ask high for SELL SL
+            L     = state["candle_low"]
+            R     = state["candle_range"]
 
             # ── Step 2: Monitor active trade ──────────────────────────────
             if state["active_deal_id"]:
@@ -394,7 +399,7 @@ def run():
             if state["trades_today"] == 0:
                 if bid > H + STOP_BUFFER:
                     # BUY breakout — use offer (ASK) for sl_dist/TP → true 1:3 from fill
-                    sl      = round(L - STOP_BUFFER, 2)
+                    sl      = round(L - SL_BUFFER, 2)
                     sl_dist = round(offer - sl, 2)
                     size    = compute_size(sl_dist)
                     tp      = round(offer + RR_RATIO * sl_dist, 2)
@@ -409,8 +414,8 @@ def run():
                         save_state(state)
 
                 elif bid < L - STOP_BUFFER:
-                    # SELL breakout — use bid (fills at bid) → true 1:3 from fill
-                    sl      = round(H + STOP_BUFFER, 2)
+                    # SELL breakout — SL at candle bid high
+                    sl      = round(H + SL_BUFFER, 2)
                     sl_dist = round(sl - bid, 2)
                     size    = compute_size(sl_dist)
                     tp      = round(bid - RR_RATIO * sl_dist, 2)
@@ -435,8 +440,8 @@ def run():
                 t1 = state["t1_direction"]
 
                 if t1 == "BUY":
-                    # T1 BUY stopped at L → T2 SELL, use bid (sells fill at bid)
-                    sl      = round(H + STOP_BUFFER, 2)
+                    # T1 BUY stopped at L → T2 SELL, SL at candle bid high
+                    sl      = round(H + SL_BUFFER, 2)
                     sl_dist = round(sl - bid, 2)
                     tp      = round(bid - RR_RATIO * sl_dist, 2)
                     size    = compute_size(sl_dist)
@@ -453,8 +458,8 @@ def run():
                         save_state(state)
 
                 elif t1 == "SELL":
-                    # T1 SELL stopped at H → T2 BUY, use offer (buys fill at offer)
-                    sl      = round(L - STOP_BUFFER, 2)
+                    # T1 SELL stopped at H → T2 BUY, SL at candle bid low
+                    sl      = round(L - SL_BUFFER, 2)
                     sl_dist = round(offer - sl, 2)
                     tp      = round(offer + RR_RATIO * sl_dist, 2)
                     size    = compute_size(sl_dist)
