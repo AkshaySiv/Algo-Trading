@@ -256,6 +256,31 @@ def place_breakout_stop(api: CapitalComAPI, direction: str, entry_level: float,
     return None
 
 
+def place_market_order(api: CapitalComAPI, direction: str, sl: float,
+                       tp: float, size: float, label: str) -> Optional[str]:
+    """
+    Place a market order (immediate fill) as fallback when stop order is rejected.
+    Returns the position dealId on success, None on failure.
+    """
+    log.warning(f"  [MARKET FALLBACK] Placing MARKET {direction} | SL={sl} TP={tp} size={size} | {label}")
+    try:
+        r = api.open_position(
+            epic=EPIC, direction=direction, size=size,
+            stop_level=sl, profit_level=tp
+        )
+        time.sleep(0.5)
+        confirm = api.confirm_deal(r.get("dealReference", ""))
+        status  = confirm.get("dealStatus", "?")
+        deal_id = confirm.get("dealId", "")
+        log.info(f"  [MARKET FALLBACK] {status} | dealId={deal_id}")
+        if status == "ACCEPTED":
+            return deal_id
+        log.warning(f"  [MARKET FALLBACK] Not accepted: {confirm}")
+    except Exception as e:
+        log.error(f"  [MARKET FALLBACK] Failed: {e}")
+    return None
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def run():
     api = CapitalComAPI(
@@ -381,14 +406,19 @@ def run():
                         time.sleep(CHECK_EVERY)
                         continue
                     elif tp_hit:
-                        # Cancel T2 pre-armed stop if it exists
-                        t2_cancel = state.get("sell_order_id") or state.get("buy_order_id")
-                        if t2_cancel:
-                            try:
-                                api.cancel_working_order(t2_cancel)
-                                log.info(f"  [ORDER] Cancelled T2 pre-armed stop {t2_cancel}")
-                            except Exception as e:
-                                log.warning(f"  [ORDER] Cancel T2 stop failed (may already be gone): {e}")
+                        # Cancel any working orders for this epic — covers the case where
+                        # the T2 pre-arm was placed successfully but confirm_deal returned
+                        # 404, so sell_order_id/buy_order_id may be None even though an
+                        # order is live in the broker.
+                        try:
+                            working = api.get_working_orders()
+                            for o in working:
+                                if o.get("workingOrderData", {}).get("epic") == EPIC:
+                                    oid = o["workingOrderData"]["dealId"]
+                                    api.cancel_working_order(oid)
+                                    log.info(f"  [ORDER] Cancelled working order {oid}")
+                        except Exception as e:
+                            log.warning(f"  [ORDER] Cancel working orders failed: {e}")
                         state["t1_tp_hit"]     = True
                         state["done_for_day"]  = True
                         state["orders_placed"] = False
@@ -447,7 +477,7 @@ def run():
                          f"BUY@{buy_entry} SL={buy_sl} TP={buy_tp} sz={buy_size} | "
                          f"SELL@{sell_entry} SL={sell_sl} TP={sell_tp} sz={sell_size}")
 
-                # Check current price — skip any side where price already blew past entry
+                # Check current price — fallback to market if stop rejected near entry
                 try:
                     cp      = api.get_current_price(EPIC)
                     cur_bid = cp.get("bid", 0)
@@ -456,18 +486,118 @@ def run():
                     cur_bid = (H + L) / 2
                     cur_ask = cur_bid + 1.0
 
+                # ── BUY side ──────────────────────────────────────────────
+                buy_oid         = None
+                buy_market_deal = None
                 if cur_ask >= buy_entry:
-                    log.warning(f"  [ORDERS] Ask {cur_ask} already at/above BUY entry {buy_entry} — skipping BUY stop")
-                    buy_oid = None
+                    log.warning(f"  [ORDERS] Ask {cur_ask} already at/above BUY entry {buy_entry} — trying MARKET BUY")
+                    buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market")
                 else:
-                    buy_oid = place_breakout_stop(api, "BUY",  buy_entry,  buy_sl,  buy_tp,  buy_size,  "T1 BUY stop")
+                    buy_oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl, buy_tp, buy_size, "T1 BUY stop")
+                    if buy_oid is None:
+                        # Stop rejected — possibly minimum-distance violation; re-check price
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_ask = cp2.get("offer", cur_ask)
+                        except Exception:
+                            pass
+                        if cur_ask >= buy_entry - 2.0:
+                            log.warning(f"  [ORDERS] BUY stop rejected, ask {cur_ask} near entry {buy_entry} — trying MARKET BUY")
+                            buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market fallback")
 
-                if cur_bid <= sell_entry:
-                    log.warning(f"  [ORDERS] Bid {cur_bid} already at/below SELL entry {sell_entry} — skipping SELL stop")
-                    sell_oid = None
+                # ── SELL side (skip entirely if BUY market already fired) ──
+                sell_oid         = None
+                sell_market_deal = None
+                if buy_market_deal is not None:
+                    pass  # BUY market live — avoid placing a competing SELL stop
+                elif cur_bid <= sell_entry:
+                    log.warning(f"  [ORDERS] Bid {cur_bid} already at/below SELL entry {sell_entry} — trying MARKET SELL")
+                    sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market")
                 else:
                     sell_oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl, sell_tp, sell_size, "T1 SELL stop")
+                    if sell_oid is None:
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_bid = cp2.get("bid", cur_bid)
+                        except Exception:
+                            pass
+                        if cur_bid <= sell_entry + 2.0:
+                            log.warning(f"  [ORDERS] SELL stop rejected, bid {cur_bid} near entry {sell_entry} — trying MARKET SELL")
+                            sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market fallback")
 
+                # ── T1 BUY filled via market — pre-arm T2 SELL ───────────
+                if buy_market_deal:
+                    if sell_oid:
+                        try:
+                            api.cancel_working_order(sell_oid)
+                            log.info(f"  [ORDERS] Cancelled competing T1 SELL stop {sell_oid}")
+                        except Exception as e:
+                            log.warning(f"  [ORDERS] Cancel SELL stop failed: {e}")
+                    t2_oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl,
+                                                 sell_tp, sell_size, "T2 SELL pre-arm")
+                    if t2_oid:
+                        log.info("  [T2 PRE-ARM] ✅ SELL stop pre-armed (market fallback path)")
+                    else:
+                        log.warning("  [T2 PRE-ARM] Failed — Step 6 will retry after T1 SL hits")
+                    state["trades_today"]   = 1
+                    state["t1_direction"]   = "BUY"
+                    state["active_deal_id"] = buy_market_deal
+                    state["active_tp"]      = buy_tp
+                    state["active_sl"]      = buy_sl
+                    state["active_dir"]     = "BUY"
+                    state["sell_order_id"]  = t2_oid
+                    state["buy_order_id"]   = None
+                    state["orders_placed"]  = t2_oid is not None
+                    state["buy_entry"]      = buy_entry
+                    state["sell_entry"]     = sell_entry
+                    state["buy_sl"]         = buy_sl
+                    state["sell_sl"]        = sell_sl
+                    state["buy_tp"]         = buy_tp
+                    state["sell_tp"]        = sell_tp
+                    state["buy_size"]       = buy_size
+                    state["sell_size"]      = sell_size
+                    save_state(state)
+                    log.info(f"  [FILL] T1 BUY market | dealId={buy_market_deal} | SL={buy_sl} TP={buy_tp}")
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                # ── T1 SELL filled via market — pre-arm T2 BUY ───────────
+                if sell_market_deal:
+                    if buy_oid:
+                        try:
+                            api.cancel_working_order(buy_oid)
+                            log.info(f"  [ORDERS] Cancelled competing T1 BUY stop {buy_oid}")
+                        except Exception as e:
+                            log.warning(f"  [ORDERS] Cancel BUY stop failed: {e}")
+                    t2_oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl,
+                                                 buy_tp, buy_size, "T2 BUY pre-arm")
+                    if t2_oid:
+                        log.info("  [T2 PRE-ARM] ✅ BUY stop pre-armed (market fallback path)")
+                    else:
+                        log.warning("  [T2 PRE-ARM] Failed — Step 6 will retry after T1 SL hits")
+                    state["trades_today"]   = 1
+                    state["t1_direction"]   = "SELL"
+                    state["active_deal_id"] = sell_market_deal
+                    state["active_tp"]      = sell_tp
+                    state["active_sl"]      = sell_sl
+                    state["active_dir"]     = "SELL"
+                    state["buy_order_id"]   = t2_oid
+                    state["sell_order_id"]  = None
+                    state["orders_placed"]  = t2_oid is not None
+                    state["buy_entry"]      = buy_entry
+                    state["sell_entry"]     = sell_entry
+                    state["buy_sl"]         = buy_sl
+                    state["sell_sl"]        = sell_sl
+                    state["buy_tp"]         = buy_tp
+                    state["sell_tp"]        = sell_tp
+                    state["buy_size"]       = buy_size
+                    state["sell_size"]      = sell_size
+                    save_state(state)
+                    log.info(f"  [FILL] T1 SELL market | dealId={sell_market_deal} | SL={sell_sl} TP={sell_tp}")
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                # ── Both sides failed entirely ─────────────────────────────
                 if buy_oid is None and sell_oid is None:
                     log.error("  [ORDERS] Both stop orders failed — retrying next cycle")
                     time.sleep(CHECK_FAST)
@@ -610,7 +740,23 @@ def run():
                         state["buy_order_id"]   = None
                         save_state(state)
                     else:
-                        log.error("  [T2 ORDER] SELL stop failed — retrying next cycle")
+                        # Stop rejected — price likely at sell_entry since T1 BUY SL just hit
+                        deal_id = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size,
+                                                     "T2 REVERSAL SELL market fallback")
+                        if deal_id:
+                            state["orders_placed"]  = False
+                            state["sell_order_id"]  = None
+                            state["buy_order_id"]   = None
+                            state["trades_today"]   = 2
+                            state["t2_direction"]   = "SELL"
+                            state["active_deal_id"] = deal_id
+                            state["active_tp"]      = sell_tp
+                            state["active_sl"]      = sell_sl
+                            state["active_dir"]     = "SELL"
+                            save_state(state)
+                            log.info(f"  [FILL] T2 SELL market | dealId={deal_id} | SL={sell_sl} TP={sell_tp}")
+                        else:
+                            log.error("  [T2 ORDER] SELL stop + market fallback both failed — retrying next cycle")
 
                 elif t1 == "SELL":
                     # T1 SELL SL hit near H → T2 BUY stop just above H
@@ -634,7 +780,23 @@ def run():
                         state["sell_order_id"]  = None
                         save_state(state)
                     else:
-                        log.error("  [T2 ORDER] BUY stop failed — retrying next cycle")
+                        # Stop rejected — price likely at buy_entry since T1 SELL SL just hit
+                        deal_id = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size,
+                                                     "T2 REVERSAL BUY market fallback")
+                        if deal_id:
+                            state["orders_placed"]  = False
+                            state["buy_order_id"]   = None
+                            state["sell_order_id"]  = None
+                            state["trades_today"]   = 2
+                            state["t2_direction"]   = "BUY"
+                            state["active_deal_id"] = deal_id
+                            state["active_tp"]      = buy_tp
+                            state["active_sl"]      = buy_sl
+                            state["active_dir"]     = "BUY"
+                            save_state(state)
+                            log.info(f"  [FILL] T2 BUY market | dealId={deal_id} | SL={buy_sl} TP={buy_tp}")
+                        else:
+                            log.error("  [T2 ORDER] BUY stop + market fallback both failed — retrying next cycle")
 
             # ── Step 7: Monitor T2 stop order for fill ────────────────────
             elif state["trades_today"] == 1 and state["t1_sl_hit"] \
