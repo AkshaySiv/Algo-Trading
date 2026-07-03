@@ -25,8 +25,6 @@ from typing import Optional
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 
-# ── Import shared API client from US500 ──────────────────────────────────────
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'US500'))
 from capitalcom_api import CapitalComAPI
 
 # ── Config ────────────────────────────────────────────────────────────────────
