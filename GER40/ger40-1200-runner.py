@@ -33,6 +33,7 @@ FIXED_SL_AED  = 40.0         # fixed risk per trade in AED
 RR_RATIO      = 3.0          # 1:3 reward-to-risk
 STOP_BUFFER   = 1.0          # points beyond candle H/L for entry trigger
 SL_BUFFER     = 0.0          # extra points beyond candle H/L for SL (0 = exact candle boundary)
+MAX_ENTRY_SLIP = 5.0         # pts: if price is more than this past entry, skip market-order fallback
 CHECK_EVERY   = 30           # seconds between scans (pre-candle)
 CHECK_FAST    = 0.5          # seconds between scans (post-candle, waiting for breakout)
 PIP_VALUE_EUR = 1.0          # DE40: 1 pt = €1 per unit
@@ -488,8 +489,19 @@ def run():
                 buy_oid         = None
                 buy_market_deal = None
                 if cur_ask >= buy_entry:
-                    log.warning(f"  [ORDERS] Ask {cur_ask} already at/above BUY entry {buy_entry} — trying MARKET BUY")
-                    buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market")
+                    buy_slip = round(cur_ask - buy_entry, 2)
+                    if buy_slip > MAX_ENTRY_SLIP:
+                        log.warning(f"  [ORDERS] Ask {cur_ask} is {buy_slip}pts past BUY entry "
+                                    f"{buy_entry} — exceeds MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) "
+                                    f"— skipping market BUY")
+                    else:
+                        mkt_sl_dist = round(cur_ask - buy_sl, 2)
+                        buy_tp      = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
+                        buy_size    = compute_size(mkt_sl_dist)
+                        log.warning(f"  [ORDERS] Ask {cur_ask} at/above BUY entry {buy_entry} "
+                                    f"(slip={buy_slip}pts) — MARKET BUY recalculated: "
+                                    f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
+                        buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market")
                 else:
                     buy_oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl, buy_tp, buy_size, "T1 BUY stop")
                     if buy_oid is None:
@@ -500,8 +512,19 @@ def run():
                         except Exception:
                             pass
                         if cur_ask >= buy_entry - 2.0:
-                            log.warning(f"  [ORDERS] BUY stop rejected, ask {cur_ask} near entry {buy_entry} — trying MARKET BUY")
-                            buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market fallback")
+                            buy_slip = max(0.0, round(cur_ask - buy_entry, 2))
+                            if buy_slip > MAX_ENTRY_SLIP:
+                                log.warning(f"  [ORDERS] BUY stop rejected, ask {cur_ask} is "
+                                            f"{buy_slip}pts past entry {buy_entry} — exceeds "
+                                            f"MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) — skipping market BUY")
+                            else:
+                                mkt_sl_dist = round(cur_ask - buy_sl, 2)
+                                buy_tp      = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
+                                buy_size    = compute_size(mkt_sl_dist)
+                                log.warning(f"  [ORDERS] BUY stop rejected, ask {cur_ask} near entry "
+                                            f"{buy_entry} (slip={buy_slip}pts) — MARKET BUY recalculated: "
+                                            f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
+                                buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market fallback")
 
                 # ── SELL side (skip entirely if BUY market already fired) ──
                 sell_oid         = None
@@ -509,8 +532,19 @@ def run():
                 if buy_market_deal is not None:
                     pass  # BUY market live — avoid placing a competing SELL stop
                 elif cur_bid <= sell_entry:
-                    log.warning(f"  [ORDERS] Bid {cur_bid} already at/below SELL entry {sell_entry} — trying MARKET SELL")
-                    sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market")
+                    sell_slip = round(sell_entry - cur_bid, 2)
+                    if sell_slip > MAX_ENTRY_SLIP:
+                        log.warning(f"  [ORDERS] Bid {cur_bid} is {sell_slip}pts past SELL entry "
+                                    f"{sell_entry} — exceeds MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) "
+                                    f"— skipping market SELL")
+                    else:
+                        mkt_sl_dist = round(sell_sl - cur_bid, 2)
+                        sell_tp     = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
+                        sell_size   = compute_size(mkt_sl_dist)
+                        log.warning(f"  [ORDERS] Bid {cur_bid} at/below SELL entry {sell_entry} "
+                                    f"(slip={sell_slip}pts) — MARKET SELL recalculated: "
+                                    f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
+                        sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market")
                 else:
                     sell_oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl, sell_tp, sell_size, "T1 SELL stop")
                     if sell_oid is None:
@@ -520,8 +554,19 @@ def run():
                         except Exception:
                             pass
                         if cur_bid <= sell_entry + 2.0:
-                            log.warning(f"  [ORDERS] SELL stop rejected, bid {cur_bid} near entry {sell_entry} — trying MARKET SELL")
-                            sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market fallback")
+                            sell_slip = max(0.0, round(sell_entry - cur_bid, 2))
+                            if sell_slip > MAX_ENTRY_SLIP:
+                                log.warning(f"  [ORDERS] SELL stop rejected, bid {cur_bid} is "
+                                            f"{sell_slip}pts past entry {sell_entry} — exceeds "
+                                            f"MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) — skipping market SELL")
+                            else:
+                                mkt_sl_dist = round(sell_sl - cur_bid, 2)
+                                sell_tp     = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
+                                sell_size   = compute_size(mkt_sl_dist)
+                                log.warning(f"  [ORDERS] SELL stop rejected, bid {cur_bid} near entry "
+                                            f"{sell_entry} (slip={sell_slip}pts) — MARKET SELL recalculated: "
+                                            f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
+                                sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market fallback")
 
                 # ── T1 BUY filled via market — pre-arm T2 SELL ───────────
                 if buy_market_deal:
