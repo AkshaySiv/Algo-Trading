@@ -413,7 +413,7 @@ def main():
             m_start = monthly_start[month_key]
             m_end   = monthly_end[month_key]
             m_pnl   = m_end - m_start
-            m_pct   = (m_pnl / m_start) * 100
+            m_pct   = (m_pnl / start_balance) * 100
             marker  = "✅" if m_pnl >= 0 else "❌"
             print(f"  {marker}  {month_key}  |  AED {m_pnl:+8,.2f}  ({m_pct:+6.2f}%)")
 

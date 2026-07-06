@@ -23,8 +23,10 @@ import os
 import sys
 from typing import Optional
 from datetime import datetime, timezone, timedelta, date
-from zoneinfo import ZoneInfo
-
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # Python 3.8 fallback
 from capitalcom_api import CapitalComAPI
 
 # ── Config ────────────────────────────────────────────────────────────────────

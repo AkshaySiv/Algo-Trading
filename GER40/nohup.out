@@ -1440,3 +1440,258 @@
 2026-07-03 14:15:56,025 [INFO]   [MONITOR] Position closed by Capital.com
 2026-07-03 14:15:56,195 [INFO]   [RESULT] T1 SL hit — T2 stop already pre-armed ✅
 2026-07-03 14:15:56,555 [INFO]   [RESULT] T2 SELL filled & closed before detection — SL ❌ — done for day
+2026-07-03 22:30:19,877 [INFO]   [DAY] New IST day 2026-07-04 — resetting state
+2026-07-03 22:30:19,889 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:00 IST | Candle closes 07:00 UTC
+2026-07-03 22:30:49,891 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:00 IST | Candle closes 07:00 UTC
+2026-07-03 22:31:19,897 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:01 IST | Candle closes 07:00 UTC
+2026-07-03 22:31:49,899 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:01 IST | Candle closes 07:00 UTC
+2026-07-03 22:32:19,906 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:02 IST | Candle closes 07:00 UTC
+2026-07-03 22:32:49,913 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:02 IST | Candle closes 07:00 UTC
+2026-07-03 22:33:19,910 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:03 IST | Candle closes 07:00 UTC
+2026-07-03 22:33:49,914 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:03 IST | Candle closes 07:00 UTC
+2026-07-03 22:34:19,922 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:04 IST | Candle closes 07:00 UTC
+2026-07-03 22:34:49,927 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:04 IST | Candle closes 07:00 UTC
+2026-07-03 22:35:19,929 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:05 IST | Candle closes 07:00 UTC
+2026-07-03 22:35:49,932 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:05 IST | Candle closes 07:00 UTC
+2026-07-03 22:36:19,939 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:06 IST | Candle closes 07:00 UTC
+2026-07-03 22:36:49,943 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:06 IST | Candle closes 07:00 UTC
+2026-07-03 22:37:19,950 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:07 IST | Candle closes 07:00 UTC
+2026-07-03 22:37:49,956 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:07 IST | Candle closes 07:00 UTC
+2026-07-03 22:38:19,959 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:08 IST | Candle closes 07:00 UTC
+2026-07-03 22:38:49,966 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:08 IST | Candle closes 07:00 UTC
+2026-07-03 22:39:19,974 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:09 IST | Candle closes 07:00 UTC
+2026-07-03 22:39:49,980 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:09 IST | Candle closes 07:00 UTC
+2026-07-03 22:40:19,983 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:10 IST | Candle closes 07:00 UTC
+2026-07-03 22:40:49,989 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:10 IST | Candle closes 07:00 UTC
+2026-07-03 22:41:19,997 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:11 IST | Candle closes 07:00 UTC
+2026-07-03 22:41:50,004 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:11 IST | Candle closes 07:00 UTC
+2026-07-03 22:42:20,010 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:12 IST | Candle closes 07:00 UTC
+2026-07-03 22:42:50,016 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:12 IST | Candle closes 07:00 UTC
+2026-07-03 22:43:20,022 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:13 IST | Candle closes 07:00 UTC
+2026-07-03 22:43:50,027 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:13 IST | Candle closes 07:00 UTC
+2026-07-03 22:44:20,030 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:14 IST | Candle closes 07:00 UTC
+2026-07-03 22:44:50,036 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:14 IST | Candle closes 07:00 UTC
+2026-07-03 22:45:20,038 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:15 IST | Candle closes 07:00 UTC
+2026-07-03 22:45:50,040 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:15 IST | Candle closes 07:00 UTC
+2026-07-03 22:46:20,046 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:16 IST | Candle closes 07:00 UTC
+2026-07-03 22:46:50,054 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:16 IST | Candle closes 07:00 UTC
+2026-07-03 22:47:20,056 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:17 IST | Candle closes 07:00 UTC
+2026-07-03 22:47:50,062 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:17 IST | Candle closes 07:00 UTC
+2026-07-03 22:48:20,066 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:18 IST | Candle closes 07:00 UTC
+2026-07-03 22:48:50,072 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:18 IST | Candle closes 07:00 UTC
+2026-07-03 22:49:20,085 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:19 IST | Candle closes 07:00 UTC
+2026-07-03 22:49:50,092 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:19 IST | Candle closes 07:00 UTC
+2026-07-03 22:50:20,099 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:20 IST | Candle closes 07:00 UTC
+2026-07-03 22:50:50,101 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:20 IST | Candle closes 07:00 UTC
+2026-07-03 22:51:20,108 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:21 IST | Candle closes 07:00 UTC
+2026-07-03 22:51:50,112 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:21 IST | Candle closes 07:00 UTC
+2026-07-03 22:52:20,116 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:22 IST | Candle closes 07:00 UTC
+2026-07-03 22:52:50,120 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:22 IST | Candle closes 07:00 UTC
+2026-07-03 22:53:20,126 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:23 IST | Candle closes 07:00 UTC
+2026-07-03 22:53:50,133 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:23 IST | Candle closes 07:00 UTC
+2026-07-03 22:54:20,138 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:24 IST | Candle closes 07:00 UTC
+2026-07-03 22:54:50,144 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:24 IST | Candle closes 07:00 UTC
+2026-07-03 22:55:20,151 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:25 IST | Candle closes 07:00 UTC
+2026-07-03 22:55:50,158 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:25 IST | Candle closes 07:00 UTC
+2026-07-03 22:56:20,165 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:26 IST | Candle closes 07:00 UTC
+2026-07-03 22:56:50,167 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:26 IST | Candle closes 07:00 UTC
+2026-07-03 22:57:20,175 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:27 IST | Candle closes 07:00 UTC
+2026-07-03 22:57:50,180 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:27 IST | Candle closes 07:00 UTC
+2026-07-03 22:58:20,186 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:28 IST | Candle closes 07:00 UTC
+2026-07-03 22:58:50,191 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:28 IST | Candle closes 07:00 UTC
+2026-07-03 22:59:20,198 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:29 IST | Candle closes 07:00 UTC
+2026-07-03 22:59:50,202 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:29 IST | Candle closes 07:00 UTC
+2026-07-03 23:00:20,208 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:30 IST | Candle closes 07:00 UTC
+2026-07-03 23:00:50,213 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:30 IST | Candle closes 07:00 UTC
+2026-07-03 23:01:20,218 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:31 IST | Candle closes 07:00 UTC
+2026-07-03 23:01:50,224 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:31 IST | Candle closes 07:00 UTC
+2026-07-03 23:02:20,230 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:32 IST | Candle closes 07:00 UTC
+2026-07-03 23:02:50,237 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:32 IST | Candle closes 07:00 UTC
+2026-07-03 23:03:20,244 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:33 IST | Candle closes 07:00 UTC
+2026-07-03 23:03:50,251 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:33 IST | Candle closes 07:00 UTC
+2026-07-03 23:04:20,258 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:34 IST | Candle closes 07:00 UTC
+2026-07-03 23:04:50,265 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:34 IST | Candle closes 07:00 UTC
+2026-07-03 23:05:20,277 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:35 IST | Candle closes 07:00 UTC
+2026-07-03 23:05:50,283 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:35 IST | Candle closes 07:00 UTC
+2026-07-03 23:06:20,288 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:36 IST | Candle closes 07:00 UTC
+2026-07-03 23:06:50,294 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:36 IST | Candle closes 07:00 UTC
+2026-07-03 23:07:20,299 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:37 IST | Candle closes 07:00 UTC
+2026-07-03 23:07:50,306 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:37 IST | Candle closes 07:00 UTC
+2026-07-03 23:08:20,313 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:38 IST | Candle closes 07:00 UTC
+2026-07-03 23:08:50,316 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:38 IST | Candle closes 07:00 UTC
+2026-07-03 23:09:20,318 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:39 IST | Candle closes 07:00 UTC
+2026-07-03 23:09:50,325 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:39 IST | Candle closes 07:00 UTC
+2026-07-03 23:10:20,328 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:40 IST | Candle closes 07:00 UTC
+2026-07-03 23:10:50,336 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:40 IST | Candle closes 07:00 UTC
+2026-07-03 23:11:20,339 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:41 IST | Candle closes 07:00 UTC
+2026-07-03 23:11:50,347 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:41 IST | Candle closes 07:00 UTC
+2026-07-03 23:12:20,352 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:42 IST | Candle closes 07:00 UTC
+2026-07-03 23:12:50,357 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:42 IST | Candle closes 07:00 UTC
+2026-07-03 23:13:20,364 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:43 IST | Candle closes 07:00 UTC
+2026-07-03 23:13:50,373 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:43 IST | Candle closes 07:00 UTC
+2026-07-03 23:14:20,381 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:44 IST | Candle closes 07:00 UTC
+2026-07-03 23:14:50,390 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:44 IST | Candle closes 07:00 UTC
+2026-07-03 23:15:20,399 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:45 IST | Candle closes 07:00 UTC
+2026-07-03 23:15:50,407 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:45 IST | Candle closes 07:00 UTC
+2026-07-03 23:16:20,408 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:46 IST | Candle closes 07:00 UTC
+2026-07-03 23:16:50,414 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:46 IST | Candle closes 07:00 UTC
+2026-07-03 23:17:20,422 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:47 IST | Candle closes 07:00 UTC
+2026-07-03 23:17:50,428 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:47 IST | Candle closes 07:00 UTC
+2026-07-03 23:18:20,433 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:48 IST | Candle closes 07:00 UTC
+2026-07-03 23:18:50,436 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:48 IST | Candle closes 07:00 UTC
+2026-07-03 23:19:20,440 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:49 IST | Candle closes 07:00 UTC
+2026-07-03 23:19:50,446 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:49 IST | Candle closes 07:00 UTC
+2026-07-03 23:20:20,452 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:50 IST | Candle closes 07:00 UTC
+2026-07-03 23:20:50,458 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:50 IST | Candle closes 07:00 UTC
+2026-07-03 23:21:20,473 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:51 IST | Candle closes 07:00 UTC
+2026-07-03 23:21:50,484 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:51 IST | Candle closes 07:00 UTC
+2026-07-03 23:22:20,493 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:52 IST | Candle closes 07:00 UTC
+2026-07-03 23:22:50,504 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:52 IST | Candle closes 07:00 UTC
+2026-07-03 23:23:20,513 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:53 IST | Candle closes 07:00 UTC
+2026-07-03 23:23:50,524 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:53 IST | Candle closes 07:00 UTC
+2026-07-03 23:24:20,535 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:54 IST | Candle closes 07:00 UTC
+2026-07-03 23:24:50,540 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:54 IST | Candle closes 07:00 UTC
+2026-07-03 23:25:20,547 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:55 IST | Candle closes 07:00 UTC
+2026-07-03 23:25:50,552 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:55 IST | Candle closes 07:00 UTC
+2026-07-03 23:26:20,558 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:56 IST | Candle closes 07:00 UTC
+2026-07-03 23:26:50,563 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:56 IST | Candle closes 07:00 UTC
+2026-07-03 23:27:20,569 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:57 IST | Candle closes 07:00 UTC
+2026-07-03 23:27:50,576 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:57 IST | Candle closes 07:00 UTC
+2026-07-03 23:28:20,583 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:58 IST | Candle closes 07:00 UTC
+2026-07-03 23:28:50,587 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:58 IST | Candle closes 07:00 UTC
+2026-07-03 23:29:20,591 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:59 IST | Candle closes 07:00 UTC
+2026-07-03 23:29:50,598 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=00:59 IST | Candle closes 07:00 UTC
+2026-07-03 23:30:20,603 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:00 IST | Candle closes 07:00 UTC
+2026-07-03 23:30:50,611 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:00 IST | Candle closes 07:00 UTC
+2026-07-03 23:31:20,613 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:01 IST | Candle closes 07:00 UTC
+2026-07-03 23:31:50,619 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:01 IST | Candle closes 07:00 UTC
+2026-07-03 23:32:20,620 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:02 IST | Candle closes 07:00 UTC
+2026-07-03 23:32:50,628 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:02 IST | Candle closes 07:00 UTC
+2026-07-03 23:33:20,635 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:03 IST | Candle closes 07:00 UTC
+2026-07-03 23:33:50,637 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:03 IST | Candle closes 07:00 UTC
+2026-07-03 23:34:20,643 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:04 IST | Candle closes 07:00 UTC
+2026-07-03 23:34:50,648 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:04 IST | Candle closes 07:00 UTC
+2026-07-03 23:35:20,654 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:05 IST | Candle closes 07:00 UTC
+2026-07-03 23:35:50,659 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:05 IST | Candle closes 07:00 UTC
+2026-07-03 23:36:20,665 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:06 IST | Candle closes 07:00 UTC
+2026-07-03 23:36:50,671 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:06 IST | Candle closes 07:00 UTC
+2026-07-03 23:37:20,681 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:07 IST | Candle closes 07:00 UTC
+2026-07-03 23:37:50,685 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:07 IST | Candle closes 07:00 UTC
+2026-07-03 23:38:20,689 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:08 IST | Candle closes 07:00 UTC
+2026-07-03 23:38:50,695 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:08 IST | Candle closes 07:00 UTC
+2026-07-03 23:39:45,576 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:09 IST | Candle closes 07:00 UTC
+2026-07-03 23:55:41,360 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:25 IST | Candle closes 07:00 UTC
+2026-07-03 23:56:11,373 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:26 IST | Candle closes 07:00 UTC
+2026-07-04 00:07:20,271 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:37 IST | Candle closes 07:00 UTC
+2026-07-04 00:07:50,278 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:37 IST | Candle closes 07:00 UTC
+2026-07-04 00:08:20,284 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:38 IST | Candle closes 07:00 UTC
+2026-07-04 00:08:50,291 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:38 IST | Candle closes 07:00 UTC
+2026-07-04 00:09:20,296 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:39 IST | Candle closes 07:00 UTC
+2026-07-04 00:09:50,301 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:39 IST | Candle closes 07:00 UTC
+2026-07-04 00:10:20,308 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:40 IST | Candle closes 07:00 UTC
+2026-07-04 00:10:50,314 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:40 IST | Candle closes 07:00 UTC
+2026-07-04 00:11:20,321 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:41 IST | Candle closes 07:00 UTC
+2026-07-04 00:11:50,323 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:41 IST | Candle closes 07:00 UTC
+2026-07-04 00:12:20,329 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:42 IST | Candle closes 07:00 UTC
+2026-07-04 00:12:50,337 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:42 IST | Candle closes 07:00 UTC
+2026-07-04 00:13:20,344 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:43 IST | Candle closes 07:00 UTC
+2026-07-04 00:13:50,351 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:43 IST | Candle closes 07:00 UTC
+2026-07-04 00:14:20,358 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:44 IST | Candle closes 07:00 UTC
+2026-07-04 00:14:50,365 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:44 IST | Candle closes 07:00 UTC
+2026-07-04 00:15:20,372 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:45 IST | Candle closes 07:00 UTC
+2026-07-04 00:15:50,377 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:45 IST | Candle closes 07:00 UTC
+2026-07-04 00:16:20,383 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:46 IST | Candle closes 07:00 UTC
+2026-07-04 00:16:50,387 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:46 IST | Candle closes 07:00 UTC
+2026-07-04 00:17:20,393 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:47 IST | Candle closes 07:00 UTC
+2026-07-04 00:17:50,396 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:47 IST | Candle closes 07:00 UTC
+2026-07-04 00:18:20,402 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:48 IST | Candle closes 07:00 UTC
+2026-07-04 00:18:50,409 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:48 IST | Candle closes 07:00 UTC
+2026-07-04 00:19:20,417 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:49 IST | Candle closes 07:00 UTC
+2026-07-04 00:19:50,425 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:49 IST | Candle closes 07:00 UTC
+2026-07-04 00:20:20,426 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:50 IST | Candle closes 07:00 UTC
+2026-07-04 00:20:50,434 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:50 IST | Candle closes 07:00 UTC
+2026-07-04 00:21:20,438 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:51 IST | Candle closes 07:00 UTC
+2026-07-04 00:21:50,446 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:51 IST | Candle closes 07:00 UTC
+2026-07-04 00:22:20,452 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:52 IST | Candle closes 07:00 UTC
+2026-07-04 00:22:50,459 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:52 IST | Candle closes 07:00 UTC
+2026-07-04 00:23:20,465 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:53 IST | Candle closes 07:00 UTC
+2026-07-04 00:23:50,469 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:53 IST | Candle closes 07:00 UTC
+2026-07-04 00:24:20,476 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:54 IST | Candle closes 07:00 UTC
+2026-07-04 00:24:50,482 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:54 IST | Candle closes 07:00 UTC
+2026-07-04 00:25:20,488 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:55 IST | Candle closes 07:00 UTC
+2026-07-04 00:25:50,494 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:55 IST | Candle closes 07:00 UTC
+2026-07-04 00:26:20,502 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=01:56 IST | Candle closes 07:00 UTC
+2026-07-04 00:42:22,985 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=02:12 IST | Candle closes 07:00 UTC
+2026-07-04 00:58:18,816 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=02:28 IST | Candle closes 07:00 UTC
+2026-07-04 00:58:48,817 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=02:28 IST | Candle closes 07:00 UTC
+2026-07-04 01:14:44,538 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=02:44 IST | Candle closes 07:00 UTC
+2026-07-04 01:15:14,550 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=02:45 IST | Candle closes 07:00 UTC
+2026-07-04 01:31:10,297 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:01 IST | Candle closes 07:00 UTC
+2026-07-04 01:33:11,530 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:03 IST | Candle closes 07:00 UTC
+2026-07-04 01:33:41,542 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:03 IST | Candle closes 07:00 UTC
+2026-07-04 01:49:37,442 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:19 IST | Candle closes 07:00 UTC
+2026-07-04 02:05:35,935 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:35 IST | Candle closes 07:00 UTC
+2026-07-04 02:06:05,943 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:36 IST | Candle closes 07:00 UTC
+2026-07-04 02:22:01,738 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:52 IST | Candle closes 07:00 UTC
+2026-07-04 02:22:31,748 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:52 IST | Candle closes 07:00 UTC
+2026-07-04 02:27:46,123 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=03:57 IST | Candle closes 07:00 UTC
+2026-07-04 02:43:41,941 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=04:13 IST | Candle closes 07:00 UTC
+2026-07-04 02:44:11,952 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=04:14 IST | Candle closes 07:00 UTC
+2026-07-04 03:00:07,818 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=04:30 IST | Candle closes 07:00 UTC
+2026-07-04 03:15:42,258 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=04:45 IST | Candle closes 07:00 UTC
+2026-07-04 03:16:37,175 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=04:46 IST | Candle closes 07:00 UTC
+2026-07-04 03:32:33,073 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=05:02 IST | Candle closes 07:00 UTC
+2026-07-04 03:33:03,081 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=05:03 IST | Candle closes 07:00 UTC
+2026-07-04 03:48:58,816 [INFO]   [WAIT] Waiting for 12:00 PM IST candle to close | Now=05:18 IST | Candle closes 07:00 UTC
+2026-07-04 04:04:54,704 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 10:49:13,466 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 11:49:13,486 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 12:49:13,509 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 13:49:13,535 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 15:00:43,413 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 16:00:43,436 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 17:00:43,461 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 18:00:43,480 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 19:00:43,502 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 20:00:43,526 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 21:00:43,549 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 22:00:43,573 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-04 23:00:43,591 [INFO]   [DAY] New IST day 2026-07-05 — resetting state
+2026-07-04 23:00:43,600 [INFO]   [WEEKEND] Market closed (Saturday) — sleeping 1h
+2026-07-05 12:21:46,946 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-05 13:27:34,544 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-05 14:27:34,582 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-05 15:27:34,617 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-05 20:26:16,001 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-05 21:26:16,024 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-05 22:26:16,045 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-05 23:26:16,071 [INFO]   [DAY] New IST day 2026-07-06 — resetting state
+2026-07-05 23:26:16,075 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-06 00:26:16,096 [INFO]   [WEEKEND] Market closed (Sunday) — sleeping 1h
+2026-07-06 11:52:26,042 [INFO] Session expiring soon — renewing...
+2026-07-06 11:52:31,673 [INFO] Session created | Account: CFD | AccountId: 323164136898826564 | Currency: AED | Mode: LIVE
+2026-07-06 11:52:32,238 [INFO]   [CANDLE] 12:00 PM IST bar: ts=2026-07-06T06:30:00 | H=25794.5 (ask=25796.0) L=25763.5 Range=31.0pts
+2026-07-06 11:52:32,239 [INFO]   [CANDLE] Captured ✅ H=25794.5 (ask=25796.0) L=25763.5 Range=31.0pts
+2026-07-06 11:52:32,239 [INFO]   [ORDERS] Placing breakout stop orders | BUY@25797.0 SL=25763.5 TP=25897.5 sz=0.3 | SELL@25762.5 SL=25796.0 TP=25662.0 sz=0.3
+2026-07-06 11:52:32,411 [WARNING]   [ORDERS] Ask 25885.9 already at/above BUY entry 25797.0 — trying MARKET BUY
+2026-07-06 11:52:32,412 [WARNING]   [MARKET FALLBACK] Placing MARKET BUY | SL=25763.5 TP=25897.5 size=0.3 | T1 BUY market
+2026-07-06 11:52:32,688 [INFO] Position opened: BUY 0.3 DE40 | dealRef=o_0dd32263-734c-4b97-ab7c-494731fdc11b
+2026-07-06 11:52:33,416 [INFO]   [MARKET FALLBACK] ACCEPTED | dealId=07101627-0000-5552-0000-000082cd18b5
+2026-07-06 11:52:33,416 [INFO]   [STOP ORDER] SELL @ 25762.5 | SL=25796.0 TP=25662.0 size=0.3 | T2 SELL pre-arm
+2026-07-06 11:52:33,650 [INFO] Stop order placed: SELL 0.3 DE40 @ 25762.5 | dealRef=o_dd705f65-3336-474c-9e3b-b40687d1ac5b
+2026-07-06 11:52:34,353 [INFO]   [STOP ORDER] ACCEPTED | dealId=07101627-0000-5552-0000-000082cd18b7
+2026-07-06 11:52:34,353 [INFO]   [T2 PRE-ARM] ✅ SELL stop pre-armed (market fallback path)
+2026-07-06 11:52:34,354 [INFO]   [FILL] T1 BUY market | dealId=07101627-0000-5552-0000-000082cd18b5 | SL=25763.5 TP=25897.5
+2026-07-06 11:52:35,042 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:53:05,551 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:53:35,776 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:54:05,976 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:54:36,203 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:55:06,391 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:55:36,607 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:56:07,112 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:57:10,529 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:57:41,036 [INFO]   [MONITOR] DE40 BUY open | P&L=+0.00
+2026-07-06 11:58:11,240 [INFO]   [MONITOR] Position closed by Capital.com
+2026-07-06 11:58:11,775 [INFO]   [ORDER] Cancelled working order 07101627-0000-5552-0000-000082cd18b7
+2026-07-06 11:58:11,779 [INFO]   [RESULT] T1 TP hit — done for day ✅
