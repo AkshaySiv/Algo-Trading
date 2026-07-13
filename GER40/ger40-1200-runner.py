@@ -36,6 +36,8 @@ RR_RATIO      = 3.0          # 1:3 reward-to-risk
 STOP_BUFFER   = 1.0          # points beyond candle H/L for entry trigger
 SL_BUFFER     = 0.0          # extra points beyond candle H/L for SL (0 = exact candle boundary)
 MAX_ENTRY_SLIP = 5.0         # pts: if price is more than this past entry, skip market-order fallback
+REENTRY_WINDOW_MINS  = 15   # minutes after candle close to keep monitoring for a re-entry
+REENTRY_PRICE_BUFFER = 2.0  # pts: re-arm stop when price returns within this of the entry level
 CHECK_EVERY   = 30           # seconds between scans (pre-candle)
 CHECK_FAST    = 0.5          # seconds between scans (post-candle, waiting for breakout)
 PIP_VALUE_EUR = 1.0          # DE40: 1 pt = €1 per unit
@@ -129,6 +131,9 @@ def fresh_state():
         "sell_tp":         None,
         "buy_size":        None,
         "sell_size":       None,
+        # Re-entry tracking (for entries skipped due to MAX_ENTRY_SLIP at open)
+        "buy_skipped":     False,  # True if BUY was skipped — monitor for price return
+        "sell_skipped":    False,  # True if SELL was skipped — monitor for price return
     }
 
 
@@ -375,21 +380,48 @@ def run():
                     # Position closed by Capital.com (TP or SL hit)
                     log.info("  [MONITOR] Position closed by Capital.com")
 
-                    try:
-                        cp      = api.get_current_price(EPIC)
-                        current = cp.get("bid", 0)
-                    except Exception:
-                        current = (H + L) / 2
-
                     active_tp  = state.get("active_tp")
                     active_sl  = state.get("active_sl")
                     active_dir = state.get("active_dir")
-                    if active_tp and active_sl and active_dir == "BUY":
-                        tp_hit = (active_tp - current) <= (current - active_sl)
-                    elif active_tp and active_sl and active_dir == "SELL":
-                        tp_hit = (current - active_tp) <= (active_sl - current)
+
+                    # ── Determine TP vs SL using actual close price from history ──
+                    # Fetch the most recent closed DE40 transaction and compare its
+                    # closeLevel to our TP/SL levels — far more reliable than the
+                    # current-price heuristic which breaks when price bounces.
+                    close_price = None
+                    try:
+                        history = api.get_trade_history(last_period=300)  # last 5 min
+                        for item in history:
+                            if item.get("epic") == EPIC:
+                                raw = item.get("closeLevel") or item.get("close_level")
+                                if raw is not None:
+                                    close_price = float(raw)
+                                    log.info(f"  [CLOSE PRICE] Actual close @ {close_price:.2f} "
+                                             f"(TP={active_tp} SL={active_sl})")
+                                    break
+                    except Exception as e:
+                        log.warning(f"  [CLOSE PRICE] History lookup failed: {e}")
+
+                    if close_price is not None and active_tp and active_sl and active_dir:
+                        if active_dir == "BUY":
+                            tp_hit = abs(close_price - active_tp) <= abs(close_price - active_sl)
+                        else:
+                            tp_hit = abs(close_price - active_tp) <= abs(close_price - active_sl)
                     else:
-                        tp_hit = False
+                        # Fallback: current price heuristic (less reliable — may be wrong
+                        # if price bounces between SL hit and detection cycle)
+                        log.warning("  [CLOSE PRICE] Not found — falling back to current price heuristic")
+                        try:
+                            cp      = api.get_current_price(EPIC)
+                            current = cp.get("bid", 0)
+                        except Exception:
+                            current = (H + L) / 2
+                        if active_tp and active_sl and active_dir == "BUY":
+                            tp_hit = (active_tp - current) <= (current - active_sl)
+                        elif active_tp and active_sl and active_dir == "SELL":
+                            tp_hit = (current - active_tp) <= (active_sl - current)
+                        else:
+                            tp_hit = False
 
                     state["active_deal_id"] = None
                     state["active_tp"]      = None
@@ -439,8 +471,37 @@ def run():
                             log.info("  [RESULT] T1 SL hit — arming T2 reversal")
 
                 else:
-                    # Position still open — just monitor
-                    p_data   = pos.get("position", {})
+                    p_data      = pos.get("position", {})
+                    pos_deal_id = p_data.get("dealId", "")
+
+                    # ── Deal ID mismatch: T1 closed & T2 fired within same cycle ──
+                    # If the open position's dealId doesn't match what we're tracking,
+                    # T1 SL was hit and the pre-armed T2 stop triggered — all before
+                    # this monitoring cycle woke up. Skip straight to tracking T2.
+                    if pos_deal_id and pos_deal_id != state["active_deal_id"]:
+                        t1     = state.get("t1_direction")
+                        t2_dir = "SELL" if t1 == "BUY" else "BUY"
+                        t2_tp  = state["sell_tp"] if t1 == "BUY" else state["buy_tp"]
+                        t2_sl  = state["sell_sl"] if t1 == "BUY" else state["buy_sl"]
+                        log.warning(f"  [MONITOR] Deal ID mismatch — T1 closed & T2 already "
+                                    f"running | switching to T2 {t2_dir} dealId={pos_deal_id}")
+                        state["trades_today"]   = 2
+                        state["t2_direction"]   = t2_dir
+                        state["active_deal_id"] = pos_deal_id
+                        state["active_tp"]      = t2_tp
+                        state["active_sl"]      = t2_sl
+                        state["active_dir"]     = t2_dir
+                        state["t1_sl_hit"]      = False   # T2 is live — T1 phase is done
+                        state["orders_placed"]  = False
+                        state["buy_order_id"]   = None
+                        state["sell_order_id"]  = None
+                        save_state(state)
+                        log.info(f"  [MONITOR] Now tracking T2 {t2_dir} | "
+                                 f"SL={t2_sl} TP={t2_tp}")
+                        time.sleep(CHECK_EVERY)
+                        continue
+
+                    # Position still open — normal monitoring
                     profit   = p_data.get("profit", 0)
                     deal_dir = p_data.get("direction", "?")
                     log.info(f"  [MONITOR] DE40 {deal_dir} open | P&L={profit:+.2f}")
@@ -488,14 +549,17 @@ def run():
                     cur_ask = cur_bid + 1.0
 
                 # ── BUY side ──────────────────────────────────────────────
-                buy_oid         = None
-                buy_market_deal = None
+                buy_oid          = None
+                buy_market_deal  = None
+                buy_was_skipped  = False
                 if cur_ask >= buy_entry:
                     buy_slip = round(cur_ask - buy_entry, 2)
                     if buy_slip > MAX_ENTRY_SLIP:
                         log.warning(f"  [ORDERS] Ask {cur_ask} is {buy_slip}pts past BUY entry "
                                     f"{buy_entry} — exceeds MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) "
-                                    f"— skipping market BUY")
+                                    f"— skipping market BUY (will re-arm if price returns within "
+                                    f"{REENTRY_WINDOW_MINS}m)")
+                        buy_was_skipped = True
                     else:
                         mkt_sl_dist = round(cur_ask - buy_sl, 2)
                         buy_tp      = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
@@ -529,8 +593,9 @@ def run():
                                 buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market fallback")
 
                 # ── SELL side (skip entirely if BUY market already fired) ──
-                sell_oid         = None
-                sell_market_deal = None
+                sell_oid          = None
+                sell_market_deal  = None
+                sell_was_skipped  = False
                 if buy_market_deal is not None:
                     pass  # BUY market live — avoid placing a competing SELL stop
                 elif cur_bid <= sell_entry:
@@ -538,7 +603,9 @@ def run():
                     if sell_slip > MAX_ENTRY_SLIP:
                         log.warning(f"  [ORDERS] Bid {cur_bid} is {sell_slip}pts past SELL entry "
                                     f"{sell_entry} — exceeds MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) "
-                                    f"— skipping market SELL")
+                                    f"— skipping market SELL (will re-arm if price returns within "
+                                    f"{REENTRY_WINDOW_MINS}m)")
+                        sell_was_skipped = True
                     else:
                         mkt_sl_dist = round(sell_sl - cur_bid, 2)
                         sell_tp     = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
@@ -659,6 +726,8 @@ def run():
                 state["sell_tp"]        = sell_tp
                 state["buy_size"]       = buy_size
                 state["sell_size"]      = sell_size
+                state["buy_skipped"]    = buy_was_skipped
+                state["sell_skipped"]   = sell_was_skipped
                 save_state(state)
                 time.sleep(CHECK_FAST)
                 continue
@@ -669,6 +738,67 @@ def run():
                 if active_ids is None:   # API error — skip cycle
                     time.sleep(CHECK_FAST)
                     continue
+
+                # ── Reentry: re-arm entries skipped due to open gap ───────────
+                # If BUY or SELL was skipped at open (price too far past entry),
+                # keep checking every cycle. Once price returns within
+                # REENTRY_PRICE_BUFFER pts of the entry, place the stop order.
+                # Stop trying after REENTRY_WINDOW_MINS minutes post-candle.
+                if state.get("buy_skipped") or state.get("sell_skipped"):
+                    state_date       = datetime.strptime(state["date"], "%Y-%m-%d").date()
+                    _, _, c_h, c_m   = candle_utc_hours(state_date)
+                    candle_close_utc = datetime(state_date.year, state_date.month,
+                                                state_date.day, c_h, c_m, 0,
+                                                tzinfo=timezone.utc)
+                    reentry_deadline = candle_close_utc + timedelta(minutes=REENTRY_WINDOW_MINS)
+                    if now_utc <= reentry_deadline:
+                        try:
+                            cp       = api.get_current_price(EPIC)
+                            re_ask   = cp.get("offer", 0)
+                            re_bid   = cp.get("bid",   0)
+                        except Exception as e:
+                            log.warning(f"  [REENTRY] Price fetch failed: {e}")
+                            re_ask = re_bid = 0
+
+                        if state.get("buy_skipped") and state.get("buy_order_id") is None \
+                                and re_ask > 0:
+                            b_entry = state.get("buy_entry", 0)
+                            if re_ask <= b_entry + REENTRY_PRICE_BUFFER:
+                                log.info(f"  [REENTRY] Ask {re_ask} returned near BUY entry "
+                                         f"{b_entry} — re-arming BUY stop")
+                                oid = place_breakout_stop(
+                                    api, "BUY", b_entry,
+                                    state["buy_sl"], state["buy_tp"], state["buy_size"],
+                                    "T1 BUY reentry stop")
+                                if oid:
+                                    state["buy_order_id"] = oid
+                                    state["buy_skipped"]  = False
+                                    active_ids.add(oid)   # reflect immediately
+                                    save_state(state)
+                                    log.info(f"  [REENTRY] ✅ BUY stop re-armed @ {b_entry}")
+
+                        if state.get("sell_skipped") and state.get("sell_order_id") is None \
+                                and re_bid > 0:
+                            s_entry = state.get("sell_entry", 0)
+                            if re_bid >= s_entry - REENTRY_PRICE_BUFFER:
+                                log.info(f"  [REENTRY] Bid {re_bid} returned near SELL entry "
+                                         f"{s_entry} — re-arming SELL stop")
+                                oid = place_breakout_stop(
+                                    api, "SELL", s_entry,
+                                    state["sell_sl"], state["sell_tp"], state["sell_size"],
+                                    "T1 SELL reentry stop")
+                                if oid:
+                                    state["sell_order_id"] = oid
+                                    state["sell_skipped"]  = False
+                                    active_ids.add(oid)   # reflect immediately
+                                    save_state(state)
+                                    log.info(f"  [REENTRY] ✅ SELL stop re-armed @ {s_entry}")
+                    else:
+                        log.info(f"  [REENTRY] Window expired ({REENTRY_WINDOW_MINS}m) — "
+                                 f"clearing skipped flags")
+                        state["buy_skipped"]  = False
+                        state["sell_skipped"] = False
+                        save_state(state)
 
                 buy_alive  = state.get("buy_order_id")  in active_ids
                 sell_alive = state.get("sell_order_id") in active_ids
@@ -754,6 +884,8 @@ def run():
                 state["active_sl"]      = active_sl
                 state["active_dir"]     = filled_dir
                 state["orders_placed"]  = t2_oid is not None
+                state["buy_skipped"]    = False   # no longer relevant once T1 is live
+                state["sell_skipped"]   = False
                 save_state(state)
                 time.sleep(CHECK_FAST)
                 continue
@@ -786,7 +918,18 @@ def run():
                         save_state(state)
                     else:
                         # Stop rejected — price likely at sell_entry since T1 BUY SL just hit
-                        deal_id = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size,
+                        # Recalculate TP/size from actual bid to maintain 1:3 R:R at fill price
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_bid = cp2.get("bid", sell_entry)
+                        except Exception:
+                            cur_bid = sell_entry
+                        mkt_sl_dist = round(sell_sl - cur_bid, 2)
+                        mkt_sell_tp   = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
+                        mkt_sell_size = compute_size(mkt_sl_dist)
+                        log.info(f"  [T2 MARKET] SELL fallback recalculated from bid={cur_bid} | "
+                                 f"SL={sell_sl} TP={mkt_sell_tp} sz={mkt_sell_size}")
+                        deal_id = place_market_order(api, "SELL", sell_sl, mkt_sell_tp, mkt_sell_size,
                                                      "T2 REVERSAL SELL market fallback")
                         if deal_id:
                             state["orders_placed"]  = False
@@ -795,11 +938,11 @@ def run():
                             state["trades_today"]   = 2
                             state["t2_direction"]   = "SELL"
                             state["active_deal_id"] = deal_id
-                            state["active_tp"]      = sell_tp
+                            state["active_tp"]      = mkt_sell_tp
                             state["active_sl"]      = sell_sl
                             state["active_dir"]     = "SELL"
                             save_state(state)
-                            log.info(f"  [FILL] T2 SELL market | dealId={deal_id} | SL={sell_sl} TP={sell_tp}")
+                            log.info(f"  [FILL] T2 SELL market | dealId={deal_id} | SL={sell_sl} TP={mkt_sell_tp}")
                         else:
                             log.error("  [T2 ORDER] SELL stop + market fallback both failed — retrying next cycle")
 
@@ -826,7 +969,18 @@ def run():
                         save_state(state)
                     else:
                         # Stop rejected — price likely at buy_entry since T1 SELL SL just hit
-                        deal_id = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size,
+                        # Recalculate TP/size from actual ask to maintain 1:3 R:R at fill price
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_ask = cp2.get("offer", buy_entry)
+                        except Exception:
+                            cur_ask = buy_entry
+                        mkt_sl_dist = round(cur_ask - buy_sl, 2)
+                        mkt_buy_tp   = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
+                        mkt_buy_size = compute_size(mkt_sl_dist)
+                        log.info(f"  [T2 MARKET] BUY fallback recalculated from ask={cur_ask} | "
+                                 f"SL={buy_sl} TP={mkt_buy_tp} sz={mkt_buy_size}")
+                        deal_id = place_market_order(api, "BUY", buy_sl, mkt_buy_tp, mkt_buy_size,
                                                      "T2 REVERSAL BUY market fallback")
                         if deal_id:
                             state["orders_placed"]  = False
@@ -835,11 +989,11 @@ def run():
                             state["trades_today"]   = 2
                             state["t2_direction"]   = "BUY"
                             state["active_deal_id"] = deal_id
-                            state["active_tp"]      = buy_tp
+                            state["active_tp"]      = mkt_buy_tp
                             state["active_sl"]      = buy_sl
                             state["active_dir"]     = "BUY"
                             save_state(state)
-                            log.info(f"  [FILL] T2 BUY market | dealId={deal_id} | SL={buy_sl} TP={buy_tp}")
+                            log.info(f"  [FILL] T2 BUY market | dealId={deal_id} | SL={buy_sl} TP={mkt_buy_tp}")
                         else:
                             log.error("  [T2 ORDER] BUY stop + market fallback both failed — retrying next cycle")
 
