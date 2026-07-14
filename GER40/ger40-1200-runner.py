@@ -474,11 +474,16 @@ def run():
                     p_data      = pos.get("position", {})
                     pos_deal_id = p_data.get("dealId", "")
 
-                    # ── Deal ID mismatch: T1 closed & T2 fired within same cycle ──
-                    # If the open position's dealId doesn't match what we're tracking,
-                    # T1 SL was hit and the pre-armed T2 stop triggered — all before
-                    # this monitoring cycle woke up. Skip straight to tracking T2.
-                    if pos_deal_id and pos_deal_id != state["active_deal_id"]:
+                    # ── Direction mismatch: T1 closed & T2 fired within same cycle ──
+                    # If the open position's direction is opposite to T1, then T1 SL
+                    # was hit and the pre-armed T2 stop triggered — all before this
+                    # monitoring cycle woke up. Skip straight to tracking T2.
+                    # NOTE: We use direction (not dealId) because Capital.com returns
+                    # different dealIds from confirm_deal vs get_all_positions for the
+                    # same position, causing false positives with dealId comparison.
+                    pos_direction = p_data.get("direction", "")
+                    t1_dir        = state.get("t1_direction", "")
+                    if pos_direction and t1_dir and pos_direction != t1_dir:
                         t1     = state.get("t1_direction")
                         t2_dir = "SELL" if t1 == "BUY" else "BUY"
                         t2_tp  = state["sell_tp"] if t1 == "BUY" else state["buy_tp"]
@@ -530,7 +535,7 @@ def run():
                 buy_tp    = round(buy_entry + RR_RATIO * buy_dist, 2)
                 buy_size  = compute_size(buy_dist)
 
-                sell_sl   = round(H_ask + SL_BUFFER, 2)      # SELL SL on ask (BUY would trigger here)
+                sell_sl   = round(H_ask + SL_BUFFER, 2)        # SELL SL at candle high ask (identified H level)
                 sell_dist = round(sell_sl - sell_entry, 2)
                 sell_tp   = round(sell_entry - RR_RATIO * sell_dist, 2)
                 sell_size = compute_size(sell_dist)
@@ -711,6 +716,9 @@ def run():
 
                 # ── Both sides failed entirely ─────────────────────────────
                 if buy_oid is None and sell_oid is None:
+                    state["buy_skipped"]  = buy_was_skipped
+                    state["sell_skipped"] = sell_was_skipped
+                    save_state(state)
                     log.error("  [ORDERS] Both stop orders failed — retrying next cycle")
                     time.sleep(CHECK_FAST)
                     continue
