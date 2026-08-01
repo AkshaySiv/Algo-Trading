@@ -1,562 +1,1067 @@
 """
-GOLD 5:30 AM IST Strategy — Dry-Run Simulator
-================================================
-Replays historical GOLD trading days through the same two-stage breakout logic as
-GER40/ger40-1200-test-runner.py. No real orders are placed; the script requests
-historical candles from the Capital.com API only.
+GOLD 5:30 AM IST Breakout — Daily Runner
+=============================================
+Continuous Capital.com runner for the GOLD 5:30 AM India-time breakout strategy.
 
-Strategy timing:
-    The reference candle opens at 5:30 AM India time (Tokyo equity-session open)
-    and lasts 30 minutes: 05:30–06:00 IST (00:00–00:30 UTC).
+Logic:
+  1. At 6:00 AM IST daily — fetch the 5:30–6:00 AM IST 30-min candle (00:00–00:30 UTC)
+  2. Place BUY stop at H+buf and SELL stop at L-buf immediately after candle close
+  3. SL = opposite side of candle | TP = entry ± 3× range (1:3 R:R)
+  4. If T1 SL hit → reverse trade (T2) via pre-armed stop order
+  5. If T1 TP hit → done for day
+  6. Trade runs overnight — TP/SL managed by broker
+  7. Close any open trade at 6:00 AM IST next day before the fresh candle
+  8. Max 2 trades per day
 
-Usage:
-    python3 gold-0530-test-runner.py --date 2026-04-10
-    python3 gold-0530-test-runner.py --date 2026-04-09 --date 2026-04-08
-    python3 gold-0530-test-runner.py --month 2026-03
-    python3 gold-0530-test-runner.py --month 2026-03 --month 2026-04
-    python3 gold-0530-test-runner.py --year 2026
-
-Before relying on results, confirm the GOLD contract's point value, minimum deal
-size, and the API epic with the broker for the relevant account.
+Run this script continuously. It can place orders when CAPITAL_DEMO is set to false.
 """
 
-import argparse
-import calendar
-import os
 import time
-from datetime import date, datetime, time as clock_time, timedelta, timezone
+import logging
+import json
+import os
+import sys
 from typing import Optional
-from zoneinfo import ZoneInfo
-
-from dotenv import load_dotenv
-
+from datetime import datetime, timezone, timedelta, date
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # Python 3.8 fallback
 from capitalcom_api import CapitalComAPI
 
-
 # ── Config ────────────────────────────────────────────────────────────────────
-# These values are deliberately grouped here so the GOLD contract assumptions can
-# be checked and adjusted without changing the entry/exit logic.
-EPIC = "GOLD"
-FIXED_SL_AED = 40.0          # Simulation risk per trade in AED.
-RR_RATIO = 3.0               # Target = 3 × initial stop distance.
-STOP_BUFFER = 1.0            # Points beyond the reference candle H/L for entry.
-SL_BUFFER = 0.0              # Extra points beyond the opposite candle extreme.
-PIP_VALUE_USD = 1.0          # Verify against the Capital.com GOLD contract.
-USD_TO_AED = 3.67            # Conversion assumption used for simulation P&L.
-START_CAPITAL = 4000.0       # Set to None to initialize from the account balance.
+EPIC = "GOLD"                # Capital.com GOLD epic; verify for the account.
+FIXED_SL_AED = 40.0          # Fixed risk per trade in AED.
+RR_RATIO = 3.0               # 1:3 reward-to-risk.
+STOP_BUFFER = 1.0            # Points beyond the candle H/L for an entry trigger.
+SL_BUFFER = 0.0              # Extra points beyond candle H/L for the stop.
+MAX_ENTRY_SLIP = 5.0         # Skip market fallback if price is farther past entry.
+REENTRY_WINDOW_MINS = 15     # Minutes after candle close to monitor skipped entries.
+REENTRY_PRICE_BUFFER = 2.0   # Re-arm stop when price returns near its entry level.
+CHECK_EVERY = 30             # Seconds between scans before the reference candle closes.
+CHECK_FAST = 0.5             # Seconds between scans while waiting for breakout activity.
+PIP_VALUE_USD = 1.0          # GOLD point value in USD per unit; verify with Capital.com.
+USD_TO_AED = 3.67            # USD-to-AED conversion assumption for fixed-risk sizing.
+STATE_FILE = "state/gold_0530_runner_state.json"
 
-ENTRY_TIME_IST = clock_time(5, 30)
-CANDLE_MINUTES = 30
+# ── Timezones ─────────────────────────────────────────────────────────────────
 IST = ZoneInfo("Asia/Kolkata")
-UTC = timezone.utc
 
-
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
-
-CAPITAL_API_KEY = os.getenv("CAPITAL_API_KEY", "")
-CAPITAL_IDENTIFIER = os.getenv("CAPITAL_IDENTIFIER", "")
-CAPITAL_PASSWORD = os.getenv("CAPITAL_PASSWORD", "")
-DEMO_MODE = os.getenv("CAPITAL_DEMO", "true").lower() == "true"
-
-
-# ── Time helpers ──────────────────────────────────────────────────────────────
-def strategy_candle_window(sim_date: date) -> tuple[datetime, datetime]:
-    """Return the reference candle's inclusive UTC start and exclusive UTC end."""
-    candle_open_ist = datetime.combine(sim_date, ENTRY_TIME_IST, tzinfo=IST)
-    candle_open_utc = candle_open_ist.astimezone(UTC)
-    candle_close_utc = candle_open_utc + timedelta(minutes=CANDLE_MINUTES)
-    return candle_open_utc, candle_close_utc
-
-
-def candle_ist_label(sim_date: date) -> str:
-    """Return the configured reference-candle window as an India-time label."""
-    candle_open_utc, candle_close_utc = strategy_candle_window(sim_date)
-    candle_open_ist = candle_open_utc.astimezone(IST)
-    candle_close_ist = candle_close_utc.astimezone(IST)
+def strategy_candle_window(d: date) -> tuple[datetime, datetime]:
+    """Return the 5:30–6:00 AM IST reference candle as UTC boundaries."""
+    candle_open_ist = datetime(d.year, d.month, d.day, 5, 30, tzinfo=IST)
+    candle_close_ist = candle_open_ist + timedelta(minutes=30)
     return (
-        f"{candle_open_ist.strftime('%I:%M %p')}–"
-        f"{candle_close_ist.strftime('%I:%M %p')} IST"
+        candle_open_ist.astimezone(timezone.utc),
+        candle_close_ist.astimezone(timezone.utc),
     )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def compute_size(sl_distance: float) -> float:
-    """Calculate a one-decimal deal size from fixed AED risk."""
-    if sl_distance <= 0:
-        raise ValueError("Stop-loss distance must be positive")
+# ── Logging ───────────────────────────────────────────────────────────────────
+os.makedirs("logs", exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/gold_0530_runner.log")
+    ]
+)
+log = logging.getLogger("gold")
 
-    size = FIXED_SL_AED / (sl_distance * PIP_VALUE_USD * USD_TO_AED)
-    return round(max(0.1, round(size, 1)), 1)
+# ── Credentials ───────────────────────────────────────────────────────────────
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'), override=True)
+
+CAPITAL_API_KEY    = os.getenv('CAPITAL_API_KEY',    '')
+CAPITAL_IDENTIFIER = os.getenv('CAPITAL_IDENTIFIER', '')
+CAPITAL_PASSWORD   = os.getenv('CAPITAL_PASSWORD',   '')
+DEMO_MODE          = os.getenv('CAPITAL_DEMO', 'true').lower() == 'true'
 
 
-def fetch_candle(api: CapitalComAPI, sim_date: date) -> Optional[dict]:
-    """Fetch the 5:30–6:00 AM IST reference candle for one simulation date."""
-    from_ts, to_ts_exclusive = strategy_candle_window(sim_date)
+# ── State helpers ─────────────────────────────────────────────────────────────
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+def today_ist():
+    return datetime.now(IST).strftime("%Y-%m-%d")
+
+def fresh_state():
+    return {
+        "date":            today_ist(),
+        "candle_high":     None,
+        "candle_high_ask": None,
+        "candle_low":      None,
+        "candle_range":    None,
+        "trades_today":    0,
+        "t1_direction":    None,
+        "t2_direction":    None,
+        "t1_sl_hit":       False,
+        "t1_tp_hit":       False,
+        "t2_tp_hit":       False,
+        "t2_sl_hit":       False,
+        "active_deal_id":  None,
+        "active_tp":       None,
+        "active_sl":       None,
+        "active_dir":      None,
+        "done_for_day":    False,
+        # Stop-order breakout entry
+        "orders_placed":   False,  # True once BUY/SELL stop orders are live
+        "buy_order_id":    None,   # working-order dealId for BUY stop
+        "sell_order_id":   None,   # working-order dealId for SELL stop
+        "buy_entry":       None,   # planned BUY entry level (H_ask + STOP_BUFFER)
+        "sell_entry":      None,   # planned SELL entry level (L - STOP_BUFFER)
+        "buy_sl":          None,
+        "sell_sl":         None,
+        "buy_tp":          None,
+        "sell_tp":         None,
+        "buy_size":        None,
+        "sell_size":       None,
+        # Re-entry tracking (for entries skipped due to MAX_ENTRY_SLIP at open)
+        "buy_skipped":     False,  # True if BUY was skipped — monitor for price return
+        "sell_skipped":    False,  # True if SELL was skipped — monitor for price return
+    }
+
+
+# ── Candle fetch ──────────────────────────────────────────────────────────────
+def fetch_0530_candle(api: CapitalComAPI, candle_date_str: str) -> Optional[dict]:
+    """
+    Fetch the 5:30–6:00 AM IST GOLD reference candle (00:00–00:30 UTC).
+    candle_date_str is the India-time date in YYYY-MM-DD format.
+    Returns {high, high_ask, low, close, range, ts} or None if unavailable.
+    """
+    candle_date = datetime.strptime(candle_date_str, "%Y-%m-%d").date()
+    from_ts, to_ts_exclusive = strategy_candle_window(candle_date)
     to_ts = to_ts_exclusive - timedelta(seconds=1)
+    from_str = from_ts.strftime("%Y-%m-%dT%H:%M:%S")
+    to_str = to_ts.strftime("%Y-%m-%dT%H:%M:%S")
 
     try:
         api._ensure_session()
-        response = api._session.get(
+        resp = api._session.get(
             f"{api.base_url}/api/v1/prices/{EPIC}",
             params={
                 "resolution": "MINUTE_30",
-                "from": from_ts.strftime("%Y-%m-%dT%H:%M:%S"),
-                "to": to_ts.strftime("%Y-%m-%dT%H:%M:%S"),
+                "from": from_str,
+                "to": to_str,
             },
             timeout=15,
         )
-        response.raise_for_status()
-        bars = response.json().get("prices", [])
+        resp.raise_for_status()
+        bars = resp.json().get("prices", [])
+
         if not bars:
+            log.debug("No bar returned for the 5:30 AM IST reference window yet")
             return None
 
         bar = bars[0]
-        high_bid = bar["highPrice"]["bid"]
-        high_ask = bar["highPrice"].get("ask", high_bid)
-        low_bid = bar["lowPrice"]["bid"]
-        close_bid = bar["closePrice"]["bid"]
+        timestamp = bar.get("snapshotTimeUTC", bar.get("snapshotTime", "?"))
+        high_bid = bar.get("highPrice", {}).get("bid", 0)
+        high_ask = bar.get("highPrice", {}).get("ask", high_bid)
+        low_bid = bar.get("lowPrice", {}).get("bid", 0)
+        close_bid = bar.get("closePrice", {}).get("bid", 0)
+        candle_range = round(high_bid - low_bid, 2)
+
+        log.info(
+            f"  [CANDLE] 5:30 AM IST bar: ts={timestamp} | "
+            f"H={high_bid} (ask={high_ask}) L={low_bid} Range={candle_range}pts"
+        )
         return {
             "high": high_bid,
             "high_ask": high_ask,
             "low": low_bid,
             "close": close_bid,
-            "range": round(high_bid - low_bid, 2),
+            "range": candle_range,
+            "ts": timestamp,
         }
-    except Exception:
+
+    except Exception as error:
+        log.warning(f"  [CANDLE] Failed to fetch: {error}")
         return None
 
 
-def fetch_replay_bars(api: CapitalComAPI, sim_date: date) -> list:
-    """
-    Fetch 30-minute replay bars from reference-candle close until immediately
-    before the next calendar day's 5:30 AM IST reference candle begins.
-    """
-    _, from_ts = strategy_candle_window(sim_date)
-    next_open_ts, _ = strategy_candle_window(sim_date + timedelta(days=1))
-    to_ts = next_open_ts - timedelta(seconds=1)
-
-    api._ensure_session()
-    response = api._session.get(
-        f"{api.base_url}/api/v1/prices/{EPIC}",
-        params={
-            "resolution": "MINUTE_30",
-            "from": from_ts.strftime("%Y-%m-%dT%H:%M:%S"),
-            "to": to_ts.strftime("%Y-%m-%dT%H:%M:%S"),
-            "max": 1000,
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json().get("prices", [])
+# ── Position sizing ───────────────────────────────────────────────────────────
+def compute_size(sl_distance: float) -> float:
+    size = FIXED_SL_AED / (sl_distance * PIP_VALUE_USD * USD_TO_AED)
+    return round(max(0.1, round(size, 1)), 1)
 
 
-def determine_exit_outcome(
-    direction: str,
-    entry: float,
-    stop: float,
-    target: float,
-    bar_high_bid: float,
-    bar_high_ask: float,
-    bar_low_bid: float,
-    bar_open: float,
-) -> Optional[str]:
-    """
-    Return ``TP`` or ``SL`` when an active position's target or stop was crossed.
-
-    A 30-minute OHLC bar cannot reveal the intrabar sequence when both levels
-    are crossed. In that case, preserve the GER40 convention: resolve a BUY as
-    TP-first only when the bar opened at/above entry, and a SELL as TP-first
-    only when it opened at/below entry. Otherwise resolve the stop first.
-    """
-    sl_hit = (
-        (direction == "BUY" and bar_low_bid <= stop)
-        or (direction == "SELL" and bar_high_ask >= stop)
-    )
-    tp_hit = (
-        (direction == "BUY" and bar_high_bid >= target)
-        or (direction == "SELL" and bar_low_bid <= target)
-    )
-
-    if sl_hit and tp_hit:
-        if direction == "BUY":
-            return "TP" if bar_open >= entry else "SL"
-        return "TP" if bar_open <= entry else "SL"
-    if tp_hit:
-        return "TP"
-    if sl_hit:
-        return "SL"
+# ── Active position check ─────────────────────────────────────────────────────
+def get_gold_position(api: CapitalComAPI) -> Optional[dict]:
+    positions = api.get_all_positions()
+    for p in positions:
+        if p.get("market", {}).get("epic") == EPIC:
+            return p
     return None
 
 
-# ── Simulator ─────────────────────────────────────────────────────────────────
-def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
-    """Run the GER40-style two-trade breakout replay for one GOLD trading day."""
-    date_str = sim_date.strftime("%Y-%m-%d")
-    _, candle_close_utc = strategy_candle_window(sim_date)
-    ist_label = candle_ist_label(sim_date)
-
-    print(f"\n{'=' * 60}")
-    print(f"  SIMULATION — {date_str}  |  Balance: AED {balance:,.2f}")
-    print(f"{'=' * 60}")
-
-    candle = fetch_candle(api, sim_date)
-    if candle is None:
-        print("  [SKIP] No candle data — market holiday or data unavailable")
-        return balance
-
-    high_bid = candle["high"]
-    high_ask = candle["high_ask"]
-    low_bid = candle["low"]
-    candle_range = candle["range"]
-    print(
-        f"  [CANDLE] {ist_label} | H={high_bid} (ask={high_ask})  "
-        f"L={low_bid}  Range={candle_range} pts"
-    )
-    print(
-        f"  [LEVELS] BUY trigger > {high_ask + STOP_BUFFER:.2f}  |  "
-        f"SELL trigger < {low_bid - STOP_BUFFER:.2f}"
-    )
-
+# ── Close any open GOLD position and cancel working orders ───────────────────
+def close_gold_position(api: CapitalComAPI, reason: str = ""):
+    pos = get_gold_position(api)
+    if pos:
+        deal_id = pos["position"]["dealId"]
+        log.info(f"  [CLOSE] Closing GOLD position {deal_id} | {reason}")
+        api.close_position(deal_id)
+        time.sleep(1)
+    # Also cancel any working stop orders for this epic
     try:
-        bars = fetch_replay_bars(api, sim_date)
-    except Exception as error:
-        print(f"  [ERROR] Could not fetch replay bars: {error}")
-        return balance
+        orders = api.get_working_orders()
+        for o in orders:
+            if o.get("workingOrderData", {}).get("epic") == EPIC:
+                api.cancel_working_order(o["workingOrderData"]["dealId"])
+                log.info("  [CLOSE] Cancelled working order")
+    except Exception as e:
+        log.warning(f"  [CLOSE] Cancel orders failed: {e}")
 
-    if not bars:
-        print("  [SKIP] No replay bars available")
-        return balance
 
-    print(
-        f"  [REPLAY] {len(bars)} 30-min bars loaded from "
-        f"{candle_close_utc.strftime('%H:%M')} UTC"
-    )
+# ── Stop-order helpers ────────────────────────────────────────────────────────
+def get_gold_working_order_ids(api: CapitalComAPI) -> Optional[set]:
+    """Returns set of active working-order dealIds for GOLD, or None on API failure."""
+    try:
+        orders = api.get_working_orders()
+        return {
+            o["workingOrderData"]["dealId"]
+            for o in orders
+            if o.get("workingOrderData", {}).get("epic") == EPIC
+        }
+    except Exception as e:
+        log.warning(f"  [ORDERS] Failed to fetch working orders: {e}")
+        return None
 
-    # ── Replay state ───────────────────────────────────────────────────────────
-    trades_today = 0
-    t1_direction: Optional[str] = None
-    t1_sl_hit = False
-    done_for_day = False
-    active_entry: Optional[float] = None
-    active_sl: Optional[float] = None
-    active_tp: Optional[float] = None
-    active_size: Optional[float] = None
-    active_dir: Optional[str] = None
-    trade_log: list[str] = []
 
-    def settle_active_trade(outcome: str, timestamp: str, *, entry_bar: bool) -> None:
-        """Record a TP/SL outcome and update the two-trade replay state."""
-        nonlocal active_dir, active_entry, active_size, active_sl, active_tp
-        nonlocal balance, done_for_day, t1_sl_hit
-
-        assert active_entry is not None
-        assert active_sl is not None
-        assert active_tp is not None
-        assert active_size is not None
-
-        if outcome == "TP":
-            close_level = active_tp
-            pnl = (
-                abs(close_level - active_entry)
-                * active_size
-                * PIP_VALUE_USD
-                * USD_TO_AED
-            )
-            pnl_pct = (pnl / balance) * 100 if balance else 0.0
-            balance += pnl
-            trade_log.append(
-                f"    ✅ TP HIT @ {close_level:.2f}  |  +AED {pnl:.2f} "
-                f"(+{pnl_pct:.1f}%)  |  ts={timestamp}"
-            )
-            done_for_day = True
-        elif outcome == "SL":
-            close_level = active_sl
-            pnl = -(
-                abs(close_level - active_entry)
-                * active_size
-                * PIP_VALUE_USD
-                * USD_TO_AED
-            )
-            pnl_pct = (pnl / balance) * 100 if balance else 0.0
-            balance += pnl
-            hit_note = " (entry-bar reversal)" if entry_bar else ""
-            trade_log.append(
-                f"    ❌ SL HIT @ {close_level:.2f}{hit_note}  |  -AED {abs(pnl):.2f} "
-                f"({pnl_pct:.1f}%)  |  ts={timestamp}"
-            )
-            if trades_today == 1:
-                t1_sl_hit = True
-            else:
-                done_for_day = True
-        else:
-            raise ValueError(f"Unsupported trade outcome: {outcome}")
-
-        active_entry = None
-        active_sl = None
-        active_tp = None
-        active_size = None
-        active_dir = None
-
-    for bar in bars:
-        if done_for_day:
-            break
-
-        timestamp = bar.get("snapshotTimeUTC", bar.get("snapshotTime", "?"))
-        bar_high_bid = bar["highPrice"]["bid"]
-        bar_high_ask = bar["highPrice"].get("ask", bar_high_bid)
-        bar_low_bid = bar["lowPrice"]["bid"]
-        bar_open = bar["openPrice"]["bid"]
-
-        # ── Monitor an active trade from an earlier replay bar ────────────────
-        if active_entry is not None:
-            assert active_sl is not None
-            assert active_tp is not None
-            assert active_dir is not None
-
-            outcome = determine_exit_outcome(
-                active_dir,
-                active_entry,
-                active_sl,
-                active_tp,
-                bar_high_bid,
-                bar_high_ask,
-                bar_low_bid,
-                bar_open,
-            )
-            if outcome is not None:
-                settle_active_trade(outcome, timestamp, entry_bar=False)
-                # A T2 reversal is deliberately armed on the next replay bar.
-                continue
-
-        # ── Entry logic ─────────────────────────────────────────────────────────
-        opened_this_bar = False
-        if done_for_day or trades_today >= 2:
-            continue
-
-        if trades_today == 0:
-            buy_triggered = bar_high_ask > high_ask + STOP_BUFFER
-            sell_triggered = bar_low_bid < low_bid - STOP_BUFFER
-
-            if buy_triggered and sell_triggered:
-                midpoint = (high_bid + low_bid) / 2
-                sell_triggered = bar_open <= midpoint
-                buy_triggered = not sell_triggered
-
-            if buy_triggered:
-                entry = round(high_ask + STOP_BUFFER, 2)
-                sl = round(low_bid - SL_BUFFER, 2)
-                sl_distance = round(entry - sl, 2)
-                size = compute_size(sl_distance)
-                tp = round(entry + RR_RATIO * sl_distance, 2)
-                label = "T1 BUY"
-                t1_direction = "BUY"
-                active_entry = entry
-                active_sl = sl
-                active_tp = tp
-                active_size = size
-                active_dir = "BUY"
-                trades_today = 1
-                opened_this_bar = True
-                trade_log.append(
-                    f"  [{label}] Entry={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
-                    f"Size={size}  SL-dist={sl_distance:.2f}pts  |  ts={timestamp}"
-                )
-
-            elif sell_triggered:
-                entry = round(low_bid - STOP_BUFFER, 2)
-                sl = round(high_ask + SL_BUFFER, 2)
-                sl_distance = round(sl - entry, 2)
-                size = compute_size(sl_distance)
-                tp = round(entry - RR_RATIO * sl_distance, 2)
-                label = "T1 SELL"
-                t1_direction = "SELL"
-                active_entry = entry
-                active_sl = sl
-                active_tp = tp
-                active_size = size
-                active_dir = "SELL"
-                trades_today = 1
-                opened_this_bar = True
-                trade_log.append(
-                    f"  [{label}] Entry={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
-                    f"Size={size}  SL-dist={sl_distance:.2f}pts  |  ts={timestamp}"
-                )
-
-        elif trades_today == 1 and t1_sl_hit:
-            if t1_direction == "BUY":
-                # T1 BUY hit its stop near L: T2 reverses short at the L boundary.
-                t2_entry = round(low_bid - STOP_BUFFER, 2)
-                t2_sl = round(high_ask + SL_BUFFER, 2)
-                t2_sl_distance = round(t2_sl - t2_entry, 2)
-                t2_tp = round(t2_entry - RR_RATIO * t2_sl_distance, 2)
-                active_dir = "SELL"
-                label = "T2 SELL"
-            else:
-                # T1 SELL hit its stop near H: T2 reverses long at the H boundary.
-                t2_entry = round(high_ask + STOP_BUFFER, 2)
-                t2_sl = round(low_bid - SL_BUFFER, 2)
-                t2_sl_distance = round(t2_entry - t2_sl, 2)
-                t2_tp = round(t2_entry + RR_RATIO * t2_sl_distance, 2)
-                active_dir = "BUY"
-                label = "T2 BUY"
-
-            active_entry = t2_entry
-            active_sl = t2_sl
-            active_tp = t2_tp
-            active_size = compute_size(t2_sl_distance)
-            trades_today = 2
-            t1_sl_hit = False
-            opened_this_bar = True
-            trade_log.append(
-                f"  [{label}] Entry={t2_entry:.2f}  SL={t2_sl:.2f}  "
-                f"TP={t2_tp:.2f}  Size={active_size}  "
-                f"SL-dist={t2_sl_distance:.2f}pts  |  ts={timestamp}"
-            )
-
-        # A position opened by a breakout can hit its TP or SL inside the very
-        # same 30-minute candle. Evaluate it before moving to the next bar.
-        if opened_this_bar and active_entry is not None:
-            assert active_sl is not None
-            assert active_tp is not None
-            assert active_dir is not None
-            outcome = determine_exit_outcome(
-                active_dir,
-                active_entry,
-                active_sl,
-                active_tp,
-                bar_high_bid,
-                bar_high_ask,
-                bar_low_bid,
-                bar_open,
-            )
-            if outcome is not None:
-                settle_active_trade(outcome, timestamp, entry_bar=True)
-
-    # ── End of day: close any simulated position at the final replay-bar close ─
-    if active_entry is not None:
-        assert active_size is not None
-        assert active_dir is not None
-        last_price = bars[-1]["closePrice"]["bid"]
-        last_timestamp = bars[-1].get("snapshotTimeUTC", "EOD")
-        if active_dir == "BUY":
-            pnl = (last_price - active_entry) * active_size * PIP_VALUE_USD * USD_TO_AED
-        else:
-            pnl = (active_entry - last_price) * active_size * PIP_VALUE_USD * USD_TO_AED
-        pnl_aed = round(pnl, 2)
-        balance += pnl_aed
-        trade_log.append(
-            f"    EOD CLOSE @ {last_price:.2f}  |  AED {pnl_aed:+.2f}  "
-            f"|  ts={last_timestamp}"
+def place_breakout_stop(api: CapitalComAPI, direction: str, entry_level: float,
+                        sl: float, tp: float, size: float, label: str) -> Optional[str]:
+    """
+    Place a stop working order for breakout entry.
+    Returns the working-order dealId on acceptance, None on failure.
+    """
+    log.info(f"  [STOP ORDER] {direction} @ {entry_level} | SL={sl} TP={tp} size={size} | {label}")
+    try:
+        r = api.place_stop_order(
+            epic=EPIC, direction=direction, size=size,
+            level=entry_level, stop_level=sl, profit_level=tp
         )
+        time.sleep(0.5)
+        confirm = api.confirm_deal(r.get("dealReference", ""))
+        status  = confirm.get("dealStatus", "?")
+        deal_id = confirm.get("dealId", "")
+        log.info(f"  [STOP ORDER] {status} | dealId={deal_id}")
+        if status == "ACCEPTED":
+            return deal_id
+        log.warning(f"  [STOP ORDER] Not accepted: {confirm}")
+    except Exception as e:
+        log.error(f"  [STOP ORDER] Failed: {e}")
+    return None
 
-    for line in trade_log:
-        print(line)
 
-    if not trade_log:
-        print("  [NO TRADE] Price never broke out of candle range")
+def place_market_order(api: CapitalComAPI, direction: str, sl: float,
+                       tp: float, size: float, label: str) -> Optional[str]:
+    """
+    Place a market order (immediate fill) as fallback when stop order is rejected.
+    Returns the position dealId on success, None on failure.
+    """
+    log.warning(f"  [MARKET FALLBACK] Placing MARKET {direction} | SL={sl} TP={tp} size={size} | {label}")
+    try:
+        r = api.open_position(
+            epic=EPIC, direction=direction, size=size,
+            stop_level=sl, profit_level=tp
+        )
+        time.sleep(0.5)
+        confirm = api.confirm_deal(r.get("dealReference", ""))
+        status  = confirm.get("dealStatus", "?")
+        deal_id = confirm.get("dealId", "")
+        log.info(f"  [MARKET FALLBACK] {status} | dealId={deal_id}")
+        if status == "ACCEPTED":
+            return deal_id
+        log.warning(f"  [MARKET FALLBACK] Not accepted: {confirm}")
+    except Exception as e:
+        log.error(f"  [MARKET FALLBACK] Failed: {e}")
+    return None
 
-    print(f"\n  Balance after: AED {balance:,.2f}")
-    return balance
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="GOLD 5:30 AM IST GER40-style breakout simulator"
-    )
-    parser.add_argument(
-        "--date", action="append", default=[], help="Specific date (YYYY-MM-DD). Repeatable."
-    )
-    parser.add_argument(
-        "--month", action="append", default=[], help="Full month (YYYY-MM). Runs weekdays."
-    )
-    parser.add_argument(
-        "--year", action="append", default=[], help="Full year (YYYY). Runs weekdays."
-    )
-    args = parser.parse_args()
-
-    if not args.date and not args.month and not args.year:
-        parser.error("Provide at least one --date, --month, or --year")
-
-    today = date.today()
-    dates: list[date] = []
-
-    for date_argument in args.date:
-        dates.append(datetime.strptime(date_argument, "%Y-%m-%d").date())
-
-    for month_argument in args.month:
-        year, month = map(int, month_argument.split("-"))
-        _, last_day = calendar.monthrange(year, month)
-        for day in range(1, last_day + 1):
-            candidate = date(year, month, day)
-            if candidate.weekday() < 5 and candidate <= today:
-                dates.append(candidate)
-
-    for year_argument in args.year:
-        for month in range(1, 13):
-            _, last_day = calendar.monthrange(int(year_argument), month)
-            for day in range(1, last_day + 1):
-                candidate = date(int(year_argument), month, day)
-                if candidate.weekday() < 5 and candidate <= today:
-                    dates.append(candidate)
-
-    dates = sorted(set(dates))
-
+# ── Main loop ─────────────────────────────────────────────────────────────────
+def run():
     api = CapitalComAPI(
         api_key=CAPITAL_API_KEY,
         identifier=CAPITAL_IDENTIFIER,
         password=CAPITAL_PASSWORD,
-        demo=DEMO_MODE,
+        demo=DEMO_MODE
     )
     api.create_session()
+    acc     = api.get_account_info()
+    balance = acc.get('balance', {}).get('balance', 0)
+    mode    = "DEMO" if DEMO_MODE else "LIVE"
+    log.info("=" * 60)
+    log.info("  GOLD 5:30 AM IST Runner — STARTED")
+    log.info(f"  Account: CFD | Currency: AED | Mode: {mode}")
+    log.info(f"  Balance: AED {balance:,.2f}")
+    log.info("=" * 60)
 
-    if START_CAPITAL is not None:
-        start_balance = START_CAPITAL
-    else:
-        account = api.get_account_info()
-        start_balance = account.get("balance", {}).get("balance", 0)
-    balance = start_balance
+    state = load_state()
 
-    print("\nGOLD 5:30 AM IST — GER40-Style Dry-Run Simulator")
-    print(f"Reference candle: {CANDLE_MINUTES} min from 05:30 IST")
-    print(f"Starting balance: AED {balance:,.2f}")
-    print(f"Simulating {len(dates)} trading day(s)\n")
+    while True:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            now_ist = now_utc.astimezone(IST)
+            today   = today_ist()
 
-    monthly_start: dict[str, float] = {}
-    monthly_end: dict[str, float] = {}
+            # ── New day — reset state ─────────────────────────────────────
+            if state.get("date") != today:
+                log.info(f"  [DAY] New IST day {today} — resetting state")
+                state = fresh_state()
+                save_state(state)
 
-    for sim_date in dates:
-        month_key = sim_date.strftime("%Y-%m")
-        if month_key not in monthly_start:
-            monthly_start[month_key] = balance
-        balance = simulate_day(api, sim_date, balance)
-        monthly_end[month_key] = balance
-        time.sleep(1)  # Avoid hammering the API during multi-day simulation.
+            # ── Weekend guard (market closed Sat & Sun UTC) ───────────────
+            if now_utc.weekday() >= 5:
+                log.info(f"  [WEEKEND] Market closed ({now_utc.strftime('%A')}) — sleeping 1h")
+                time.sleep(3600)
+                continue
 
-    pnl = balance - start_balance
-    pnl_pct = (pnl / start_balance) * 100 if start_balance else 0.0
+            # ── Done for day — sleep until next day ───────────────────────
+            if state["done_for_day"]:
+                log.debug("  [DAY] Done for today — waiting for tomorrow")
+                time.sleep(CHECK_EVERY)
+                continue
 
-    if len(monthly_start) > 1:
-        print(f"\n{'=' * 60}")
-        print("  MONTHLY BREAKDOWN")
-        print(f"{'=' * 60}")
-        for month_key in sorted(monthly_start):
-            month_start = monthly_start[month_key]
-            month_end = monthly_end[month_key]
-            month_pnl = month_end - month_start
-            month_pct = (month_pnl / month_start) * 100 if month_start else 0.0
-            marker = "WIN" if month_pnl >= 0 else "LOSS"
-            print(
-                f"  {marker:4} {month_key}  |  AED {month_pnl:+8,.2f}  "
-                f"({month_pct:+6.2f}%)"
-            )
+            # ── Step 1: Capture 5:30 AM IST candle (after 00:30 UTC) ─────
+            if state["candle_high"] is None:
+                state_date = datetime.strptime(state["date"], "%Y-%m-%d").date()
+                _, candle_close_utc = strategy_candle_window(state_date)
 
-    print(f"\n{'=' * 60}")
-    print(f"  STARTING BALANCE : AED {start_balance:,.2f}")
-    print(f"  FINAL BALANCE    : AED {balance:,.2f}")
-    print(f"  NET P&L          : AED {pnl:+,.2f} ({pnl_pct:+.2f}%)")
-    print(f"{'=' * 60}\n")
+                if now_utc < candle_close_utc:
+                    log.info(f"  [WAIT] Waiting for 5:30 AM IST candle to close | "
+                             f"Now={now_ist.strftime('%H:%M')} IST | "
+                             f"Candle closes {candle_close_utc.strftime('%H:%M')} UTC")
+                    time.sleep(CHECK_EVERY)
+                    continue
+
+                # Close anything running from the previous day before fresh trade.
+                close_gold_position(api, "Pre-candle cleanup — closing previous day trade")
+                state["active_deal_id"] = None
+                state["t1_sl_hit"] = False
+                state["trades_today"] = 0
+                save_state(state)
+
+                candle = fetch_0530_candle(api, state["date"])
+                if candle is None:
+                    log.info("  [WAIT] Candle not available yet — retrying")
+                    time.sleep(30)
+                    continue
+
+                state["candle_high"] = candle["high"]
+                state["candle_high_ask"] = candle["high_ask"]
+                state["candle_low"] = candle["low"]
+                state["candle_range"] = candle["range"]
+                save_state(state)
+                log.info(f"  [CANDLE] Captured ✅ H={candle['high']} (ask={candle['high_ask']}) "
+                         f"L={candle['low']} Range={candle['range']}pts")
+
+            H     = state["candle_high"]
+            H_ask = state.get("candle_high_ask", H)  # ask high — used for BUY entry & SELL SL
+            L     = state["candle_low"]
+            R     = state["candle_range"]
+
+            # ── Step 2: Monitor active trade ──────────────────────────────
+            if state["active_deal_id"]:
+                pos = get_gold_position(api)
+
+                if pos is None:
+                    # Position closed by Capital.com (TP or SL hit)
+                    log.info("  [MONITOR] Position closed by Capital.com")
+
+                    active_tp  = state.get("active_tp")
+                    active_sl  = state.get("active_sl")
+                    active_dir = state.get("active_dir")
+
+                    # ── Determine TP vs SL using actual close price from history ──
+                    # Fetch the most recent closed GOLD transaction and compare its
+                    # closeLevel to our TP/SL levels — far more reliable than the
+                    # current-price heuristic which breaks when price bounces.
+                    close_price = None
+                    try:
+                        history = api.get_trade_history(last_period=300)  # last 5 min
+                        for item in history:
+                            if item.get("epic") == EPIC:
+                                raw = item.get("closeLevel") or item.get("close_level")
+                                if raw is not None:
+                                    close_price = float(raw)
+                                    log.info(f"  [CLOSE PRICE] Actual close @ {close_price:.2f} "
+                                             f"(TP={active_tp} SL={active_sl})")
+                                    break
+                    except Exception as e:
+                        log.warning(f"  [CLOSE PRICE] History lookup failed: {e}")
+
+                    if close_price is not None and active_tp and active_sl and active_dir:
+                        if active_dir == "BUY":
+                            tp_hit = abs(close_price - active_tp) <= abs(close_price - active_sl)
+                        else:
+                            tp_hit = abs(close_price - active_tp) <= abs(close_price - active_sl)
+                    else:
+                        # Fallback: current price heuristic (less reliable — may be wrong
+                        # if price bounces between SL hit and detection cycle)
+                        log.warning("  [CLOSE PRICE] Not found — falling back to current price heuristic")
+                        try:
+                            cp      = api.get_current_price(EPIC)
+                            current = cp.get("bid", 0)
+                        except Exception:
+                            current = (H + L) / 2
+                        if active_tp and active_sl and active_dir == "BUY":
+                            tp_hit = (active_tp - current) <= (current - active_sl)
+                        elif active_tp and active_sl and active_dir == "SELL":
+                            tp_hit = (current - active_tp) <= (active_sl - current)
+                        else:
+                            tp_hit = False
+
+                    state["active_deal_id"] = None
+                    state["active_tp"]      = None
+                    state["active_sl"]      = None
+                    state["active_dir"]     = None
+
+                    if state["trades_today"] >= 2:
+                        # T2 just closed (TP or SL) — done for day either way
+                        state["t2_tp_hit"]    = tp_hit
+                        state["t2_sl_hit"]    = not tp_hit
+                        state["done_for_day"] = True
+                        save_state(state)
+                        result = "TP ✅" if tp_hit else "SL ❌"
+                        log.info(f"  [RESULT] T2 closed — {result} — done for day")
+                        time.sleep(CHECK_EVERY)
+                        continue
+                    elif tp_hit:
+                        # Cancel any working orders for this epic — covers the case where
+                        # the T2 pre-arm was placed successfully but confirm_deal returned
+                        # 404, so sell_order_id/buy_order_id may be None even though an
+                        # order is live in the broker.
+                        try:
+                            working = api.get_working_orders()
+                            for o in working:
+                                if o.get("workingOrderData", {}).get("epic") == EPIC:
+                                    oid = o["workingOrderData"]["dealId"]
+                                    api.cancel_working_order(oid)
+                                    log.info(f"  [ORDER] Cancelled working order {oid}")
+                        except Exception as e:
+                            log.warning(f"  [ORDER] Cancel working orders failed: {e}")
+                        state["t1_tp_hit"]     = True
+                        state["done_for_day"]  = True
+                        state["orders_placed"] = False
+                        state["buy_order_id"]  = None
+                        state["sell_order_id"] = None
+                        save_state(state)
+                        log.info("  [RESULT] T1 TP hit — done for day ✅")
+                        time.sleep(CHECK_EVERY)
+                        continue
+                    else:
+                        # T1 SL hit
+                        state["t1_sl_hit"] = True
+                        save_state(state)
+                        if state.get("orders_placed"):
+                            log.info("  [RESULT] T1 SL hit — T2 stop already pre-armed ✅")
+                        else:
+                            log.info("  [RESULT] T1 SL hit — arming T2 reversal")
+
+                else:
+                    p_data      = pos.get("position", {})
+                    pos_deal_id = p_data.get("dealId", "")
+
+                    # ── Direction mismatch: T1 closed & T2 fired within same cycle ──
+                    # If the open position's direction is opposite to T1, then T1 SL
+                    # was hit and the pre-armed T2 stop triggered — all before this
+                    # monitoring cycle woke up. Skip straight to tracking T2.
+                    # NOTE: We use direction (not dealId) because Capital.com returns
+                    # different dealIds from confirm_deal vs get_all_positions for the
+                    # same position, causing false positives with dealId comparison.
+                    pos_direction = p_data.get("direction", "")
+                    t1_dir        = state.get("t1_direction", "")
+                    if pos_direction and t1_dir and pos_direction != t1_dir:
+                        t1     = state.get("t1_direction")
+                        t2_dir = "SELL" if t1 == "BUY" else "BUY"
+                        t2_tp  = state["sell_tp"] if t1 == "BUY" else state["buy_tp"]
+                        t2_sl  = state["sell_sl"] if t1 == "BUY" else state["buy_sl"]
+                        log.warning(f"  [MONITOR] Deal ID mismatch — T1 closed & T2 already "
+                                    f"running | switching to T2 {t2_dir} dealId={pos_deal_id}")
+                        state["trades_today"]   = 2
+                        state["t2_direction"]   = t2_dir
+                        state["active_deal_id"] = pos_deal_id
+                        state["active_tp"]      = t2_tp
+                        state["active_sl"]      = t2_sl
+                        state["active_dir"]     = t2_dir
+                        state["t1_sl_hit"]      = False   # T2 is live — T1 phase is done
+                        state["orders_placed"]  = False
+                        state["buy_order_id"]   = None
+                        state["sell_order_id"]  = None
+                        save_state(state)
+                        log.info(f"  [MONITOR] Now tracking T2 {t2_dir} | "
+                                 f"SL={t2_sl} TP={t2_tp}")
+                        time.sleep(CHECK_EVERY)
+                        continue
+
+                    # Position still open — normal monitoring
+                    profit   = p_data.get("profit", 0)
+                    deal_dir = p_data.get("direction", "?")
+                    log.info(f"  [MONITOR] GOLD {deal_dir} open | P&L={profit:+.2f}")
+                    time.sleep(CHECK_EVERY)
+                    continue
+
+            # ── Step 3: Max trades guard ───────────────────────────────────
+            if state["trades_today"] >= 2 or state["done_for_day"]:
+                log.info("  [GUARD] Max 2 trades reached — done for day")
+                state["done_for_day"] = True
+                save_state(state)
+                time.sleep(CHECK_EVERY)
+                continue
+
+            # ── Step 4: Place breakout stop orders once after candle capture ─
+            # Instead of polling price and firing market orders (which fill
+            # multiple pts past H/L due to latency), place stop working orders
+            # at the exact breakout levels immediately. The broker fires them
+            # at H+STOP_BUFFER / L-STOP_BUFFER with pre-computed SL/TP/size.
+            if state["trades_today"] == 0 and not state.get("orders_placed"):
+                buy_entry  = round(H_ask + STOP_BUFFER, 2)   # BUY triggers on ask
+                sell_entry = round(L   - STOP_BUFFER, 2)     # SELL triggers on bid
+
+                buy_sl    = round(L - SL_BUFFER, 2)
+                buy_dist  = round(buy_entry - buy_sl, 2)
+                buy_tp    = round(buy_entry + RR_RATIO * buy_dist, 2)
+                buy_size  = compute_size(buy_dist)
+
+                sell_sl   = round(H_ask + SL_BUFFER, 2)        # SELL SL at candle high ask (identified H level)
+                sell_dist = round(sell_sl - sell_entry, 2)
+                sell_tp   = round(sell_entry - RR_RATIO * sell_dist, 2)
+                sell_size = compute_size(sell_dist)
+
+                log.info(f"  [ORDERS] Placing breakout stop orders | "
+                         f"BUY@{buy_entry} SL={buy_sl} TP={buy_tp} sz={buy_size} | "
+                         f"SELL@{sell_entry} SL={sell_sl} TP={sell_tp} sz={sell_size}")
+
+                # Check current price — fallback to market if stop rejected near entry
+                try:
+                    cp      = api.get_current_price(EPIC)
+                    cur_bid = cp.get("bid", 0)
+                    cur_ask = cp.get("offer", cur_bid + 1.0)
+                except Exception:
+                    cur_bid = (H + L) / 2
+                    cur_ask = cur_bid + 1.0
+
+                # ── BUY side ──────────────────────────────────────────────
+                buy_oid          = None
+                buy_market_deal  = None
+                buy_was_skipped  = False
+                if cur_ask >= buy_entry:
+                    buy_slip = round(cur_ask - buy_entry, 2)
+                    if buy_slip > MAX_ENTRY_SLIP:
+                        log.warning(f"  [ORDERS] Ask {cur_ask} is {buy_slip}pts past BUY entry "
+                                    f"{buy_entry} — exceeds MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) "
+                                    f"— skipping market BUY (will re-arm if price returns within "
+                                    f"{REENTRY_WINDOW_MINS}m)")
+                        buy_was_skipped = True
+                    else:
+                        mkt_sl_dist = round(cur_ask - buy_sl, 2)
+                        buy_tp      = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
+                        buy_size    = compute_size(mkt_sl_dist)
+                        log.warning(f"  [ORDERS] Ask {cur_ask} at/above BUY entry {buy_entry} "
+                                    f"(slip={buy_slip}pts) — MARKET BUY recalculated: "
+                                    f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
+                        buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market")
+                else:
+                    buy_oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl, buy_tp, buy_size, "T1 BUY stop")
+                    if buy_oid is None:
+                        # Stop rejected — possibly minimum-distance violation; re-check price
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_ask = cp2.get("offer", cur_ask)
+                        except Exception:
+                            pass
+                        if cur_ask >= buy_entry - 2.0:
+                            buy_slip = max(0.0, round(cur_ask - buy_entry, 2))
+                            if buy_slip > MAX_ENTRY_SLIP:
+                                log.warning(f"  [ORDERS] BUY stop rejected, ask {cur_ask} is "
+                                            f"{buy_slip}pts past entry {buy_entry} — exceeds "
+                                            f"MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) — skipping market BUY")
+                            else:
+                                mkt_sl_dist = round(cur_ask - buy_sl, 2)
+                                buy_tp      = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
+                                buy_size    = compute_size(mkt_sl_dist)
+                                log.warning(f"  [ORDERS] BUY stop rejected, ask {cur_ask} near entry "
+                                            f"{buy_entry} (slip={buy_slip}pts) — MARKET BUY recalculated: "
+                                            f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
+                                buy_market_deal = place_market_order(api, "BUY", buy_sl, buy_tp, buy_size, "T1 BUY market fallback")
+
+                # ── SELL side (skip entirely if BUY market already fired) ──
+                sell_oid          = None
+                sell_market_deal  = None
+                sell_was_skipped  = False
+                if buy_market_deal is not None:
+                    pass  # BUY market live — avoid placing a competing SELL stop
+                elif cur_bid <= sell_entry:
+                    sell_slip = round(sell_entry - cur_bid, 2)
+                    if sell_slip > MAX_ENTRY_SLIP:
+                        log.warning(f"  [ORDERS] Bid {cur_bid} is {sell_slip}pts past SELL entry "
+                                    f"{sell_entry} — exceeds MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) "
+                                    f"— skipping market SELL (will re-arm if price returns within "
+                                    f"{REENTRY_WINDOW_MINS}m)")
+                        sell_was_skipped = True
+                    else:
+                        mkt_sl_dist = round(sell_sl - cur_bid, 2)
+                        sell_tp     = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
+                        sell_size   = compute_size(mkt_sl_dist)
+                        log.warning(f"  [ORDERS] Bid {cur_bid} at/below SELL entry {sell_entry} "
+                                    f"(slip={sell_slip}pts) — MARKET SELL recalculated: "
+                                    f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
+                        sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market")
+                else:
+                    sell_oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl, sell_tp, sell_size, "T1 SELL stop")
+                    if sell_oid is None:
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_bid = cp2.get("bid", cur_bid)
+                        except Exception:
+                            pass
+                        if cur_bid <= sell_entry + 2.0:
+                            sell_slip = max(0.0, round(sell_entry - cur_bid, 2))
+                            if sell_slip > MAX_ENTRY_SLIP:
+                                log.warning(f"  [ORDERS] SELL stop rejected, bid {cur_bid} is "
+                                            f"{sell_slip}pts past entry {sell_entry} — exceeds "
+                                            f"MAX_ENTRY_SLIP ({MAX_ENTRY_SLIP}pts) — skipping market SELL")
+                            else:
+                                mkt_sl_dist = round(sell_sl - cur_bid, 2)
+                                sell_tp     = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
+                                sell_size   = compute_size(mkt_sl_dist)
+                                log.warning(f"  [ORDERS] SELL stop rejected, bid {cur_bid} near entry "
+                                            f"{sell_entry} (slip={sell_slip}pts) — MARKET SELL recalculated: "
+                                            f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
+                                sell_market_deal = place_market_order(api, "SELL", sell_sl, sell_tp, sell_size, "T1 SELL market fallback")
+
+                # ── T1 BUY filled via market — pre-arm T2 SELL ───────────
+                if buy_market_deal:
+                    if sell_oid:
+                        try:
+                            api.cancel_working_order(sell_oid)
+                            log.info(f"  [ORDERS] Cancelled competing T1 SELL stop {sell_oid}")
+                        except Exception as e:
+                            log.warning(f"  [ORDERS] Cancel SELL stop failed: {e}")
+                    t2_oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl,
+                                                 sell_tp, sell_size, "T2 SELL pre-arm")
+                    if t2_oid:
+                        log.info("  [T2 PRE-ARM] ✅ SELL stop pre-armed (market fallback path)")
+                    else:
+                        log.warning("  [T2 PRE-ARM] Failed — Step 6 will retry after T1 SL hits")
+                    state["trades_today"]   = 1
+                    state["t1_direction"]   = "BUY"
+                    state["active_deal_id"] = buy_market_deal
+                    state["active_tp"]      = buy_tp
+                    state["active_sl"]      = buy_sl
+                    state["active_dir"]     = "BUY"
+                    state["sell_order_id"]  = t2_oid
+                    state["buy_order_id"]   = None
+                    state["orders_placed"]  = t2_oid is not None
+                    state["buy_entry"]      = buy_entry
+                    state["sell_entry"]     = sell_entry
+                    state["buy_sl"]         = buy_sl
+                    state["sell_sl"]        = sell_sl
+                    state["buy_tp"]         = buy_tp
+                    state["sell_tp"]        = sell_tp
+                    state["buy_size"]       = buy_size
+                    state["sell_size"]      = sell_size
+                    save_state(state)
+                    log.info(f"  [FILL] T1 BUY market | dealId={buy_market_deal} | SL={buy_sl} TP={buy_tp}")
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                # ── T1 SELL filled via market — pre-arm T2 BUY ───────────
+                if sell_market_deal:
+                    if buy_oid:
+                        try:
+                            api.cancel_working_order(buy_oid)
+                            log.info(f"  [ORDERS] Cancelled competing T1 BUY stop {buy_oid}")
+                        except Exception as e:
+                            log.warning(f"  [ORDERS] Cancel BUY stop failed: {e}")
+                    t2_oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl,
+                                                 buy_tp, buy_size, "T2 BUY pre-arm")
+                    if t2_oid:
+                        log.info("  [T2 PRE-ARM] ✅ BUY stop pre-armed (market fallback path)")
+                    else:
+                        log.warning("  [T2 PRE-ARM] Failed — Step 6 will retry after T1 SL hits")
+                    state["trades_today"]   = 1
+                    state["t1_direction"]   = "SELL"
+                    state["active_deal_id"] = sell_market_deal
+                    state["active_tp"]      = sell_tp
+                    state["active_sl"]      = sell_sl
+                    state["active_dir"]     = "SELL"
+                    state["buy_order_id"]   = t2_oid
+                    state["sell_order_id"]  = None
+                    state["orders_placed"]  = t2_oid is not None
+                    state["buy_entry"]      = buy_entry
+                    state["sell_entry"]     = sell_entry
+                    state["buy_sl"]         = buy_sl
+                    state["sell_sl"]        = sell_sl
+                    state["buy_tp"]         = buy_tp
+                    state["sell_tp"]        = sell_tp
+                    state["buy_size"]       = buy_size
+                    state["sell_size"]      = sell_size
+                    save_state(state)
+                    log.info(f"  [FILL] T1 SELL market | dealId={sell_market_deal} | SL={sell_sl} TP={sell_tp}")
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                # ── Both sides failed entirely ─────────────────────────────
+                if buy_oid is None and sell_oid is None:
+                    state["buy_skipped"]  = buy_was_skipped
+                    state["sell_skipped"] = sell_was_skipped
+                    save_state(state)
+                    log.error("  [ORDERS] Both stop orders failed — retrying next cycle")
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                state["orders_placed"]  = True
+                state["buy_order_id"]   = buy_oid
+                state["sell_order_id"]  = sell_oid
+                state["buy_entry"]      = buy_entry
+                state["sell_entry"]     = sell_entry
+                state["buy_sl"]         = buy_sl
+                state["sell_sl"]        = sell_sl
+                state["buy_tp"]         = buy_tp
+                state["sell_tp"]        = sell_tp
+                state["buy_size"]       = buy_size
+                state["sell_size"]      = sell_size
+                state["buy_skipped"]    = buy_was_skipped
+                state["sell_skipped"]   = sell_was_skipped
+                save_state(state)
+                time.sleep(CHECK_FAST)
+                continue
+
+            # ── Step 5: Monitor stop orders — detect T1 fill ──────────────
+            if state["trades_today"] == 0 and state.get("orders_placed"):
+                active_ids = get_gold_working_order_ids(api)
+                if active_ids is None:   # API error — skip cycle
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                # ── Reentry: re-arm entries skipped due to open gap ───────────
+                # If BUY or SELL was skipped at open (price too far past entry),
+                # keep checking every cycle. Once price returns within
+                # REENTRY_PRICE_BUFFER pts of the entry, place the stop order.
+                # Stop trying after REENTRY_WINDOW_MINS minutes post-candle.
+                if state.get("buy_skipped") or state.get("sell_skipped"):
+                    state_date = datetime.strptime(state["date"], "%Y-%m-%d").date()
+                    _, candle_close_utc = strategy_candle_window(state_date)
+                    reentry_deadline = candle_close_utc + timedelta(minutes=REENTRY_WINDOW_MINS)
+                    if now_utc <= reentry_deadline:
+                        try:
+                            cp       = api.get_current_price(EPIC)
+                            re_ask   = cp.get("offer", 0)
+                            re_bid   = cp.get("bid",   0)
+                        except Exception as e:
+                            log.warning(f"  [REENTRY] Price fetch failed: {e}")
+                            re_ask = re_bid = 0
+
+                        if state.get("buy_skipped") and state.get("buy_order_id") is None \
+                                and re_ask > 0:
+                            b_entry = state.get("buy_entry", 0)
+                            if re_ask <= b_entry + REENTRY_PRICE_BUFFER:
+                                log.info(f"  [REENTRY] Ask {re_ask} returned near BUY entry "
+                                         f"{b_entry} — re-arming BUY stop")
+                                oid = place_breakout_stop(
+                                    api, "BUY", b_entry,
+                                    state["buy_sl"], state["buy_tp"], state["buy_size"],
+                                    "T1 BUY reentry stop")
+                                if oid:
+                                    state["buy_order_id"] = oid
+                                    state["buy_skipped"]  = False
+                                    active_ids.add(oid)   # reflect immediately
+                                    save_state(state)
+                                    log.info(f"  [REENTRY] ✅ BUY stop re-armed @ {b_entry}")
+
+                        if state.get("sell_skipped") and state.get("sell_order_id") is None \
+                                and re_bid > 0:
+                            s_entry = state.get("sell_entry", 0)
+                            if re_bid >= s_entry - REENTRY_PRICE_BUFFER:
+                                log.info(f"  [REENTRY] Bid {re_bid} returned near SELL entry "
+                                         f"{s_entry} — re-arming SELL stop")
+                                oid = place_breakout_stop(
+                                    api, "SELL", s_entry,
+                                    state["sell_sl"], state["sell_tp"], state["sell_size"],
+                                    "T1 SELL reentry stop")
+                                if oid:
+                                    state["sell_order_id"] = oid
+                                    state["sell_skipped"]  = False
+                                    active_ids.add(oid)   # reflect immediately
+                                    save_state(state)
+                                    log.info(f"  [REENTRY] ✅ SELL stop re-armed @ {s_entry}")
+                    else:
+                        log.info(f"  [REENTRY] Window expired ({REENTRY_WINDOW_MINS}m) — "
+                                 f"clearing skipped flags")
+                        state["buy_skipped"]  = False
+                        state["sell_skipped"] = False
+                        save_state(state)
+
+                buy_alive  = state.get("buy_order_id")  in active_ids
+                sell_alive = state.get("sell_order_id") in active_ids
+                pos        = get_gold_position(api)
+
+                filled_dir = None
+                cancel_oid = None
+                active_sl  = None
+                active_tp  = None
+
+                if state.get("buy_order_id") and not buy_alive and pos is not None:
+                    filled_dir = "BUY"
+                    cancel_oid = state.get("sell_order_id")
+                    active_sl  = state["buy_sl"]
+                    active_tp  = state["buy_tp"]
+                elif state.get("sell_order_id") and not sell_alive and pos is not None:
+                    filled_dir = "SELL"
+                    cancel_oid = state.get("buy_order_id")
+                    active_sl  = state["sell_sl"]
+                    active_tp  = state["sell_tp"]
+                else:
+                    log.info(f"  [WAIT] Stop orders live | "
+                             f"BUY@{state.get('buy_entry')} SELL@{state.get('sell_entry')}")
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                # Cancel the unfilled opposite order
+                if cancel_oid:
+                    try:
+                        api.cancel_working_order(cancel_oid)
+                        log.info(f"  [ORDER] Cancelled opposite stop order {cancel_oid}")
+                    except Exception as e:
+                        log.warning(f"  [ORDER] Cancel failed (may already be gone): {e}")
+
+                deal_id    = pos["position"]["dealId"]
+                fill_price = pos["position"].get("openLevel", "?")
+                log.info(f"  [FILL] T1 {filled_dir} stop filled @ {fill_price} | "
+                         f"dealId={deal_id} | SL={active_sl} TP={active_tp}")
+
+                # Pre-arm T2 immediately while T1 is running.
+                # The opposite candle boundary is far enough away that the stop level
+                # is valid. If T1 hits TP we cancel it; if T1 hits SL the stop is
+                # already live and triggers without any race condition.
+                t2_oid = None
+                if filled_dir == "BUY":
+                    t2_entry = state["sell_entry"]
+                    t2_sl    = state["sell_sl"]
+                    t2_tp    = state["sell_tp"]
+                    t2_size  = state["sell_size"]
+                    log.info(f"  [T2 PRE-ARM] SELL stop @ {t2_entry} | "
+                             f"SL={t2_sl} TP={t2_tp} sz={t2_size}")
+                    t2_oid = place_breakout_stop(api, "SELL", t2_entry, t2_sl,
+                                                 t2_tp, t2_size,
+                                                 "T2 SELL stop pre-armed")
+                    if t2_oid:
+                        log.info("  [T2 PRE-ARM] ✅ Live — triggers only if price falls to T1 SL")
+                    else:
+                        log.warning("  [T2 PRE-ARM] Failed — will retry in Step 6 after T1 SL hits")
+                    state["sell_order_id"] = t2_oid
+                    state["buy_order_id"]  = None
+
+                elif filled_dir == "SELL":
+                    t2_entry = state["buy_entry"]
+                    t2_sl    = state["buy_sl"]
+                    t2_tp    = state["buy_tp"]
+                    t2_size  = state["buy_size"]
+                    log.info(f"  [T2 PRE-ARM] BUY stop @ {t2_entry} | "
+                             f"SL={t2_sl} TP={t2_tp} sz={t2_size}")
+                    t2_oid = place_breakout_stop(api, "BUY", t2_entry, t2_sl,
+                                                 t2_tp, t2_size,
+                                                 "T2 BUY stop pre-armed")
+                    if t2_oid:
+                        log.info("  [T2 PRE-ARM] ✅ Live — triggers only if price rises to T1 SL")
+                    else:
+                        log.warning("  [T2 PRE-ARM] Failed — will retry in Step 6 after T1 SL hits")
+                    state["buy_order_id"]  = t2_oid
+                    state["sell_order_id"] = None
+
+                state["trades_today"]   = 1
+                state["t1_direction"]   = filled_dir
+                state["active_deal_id"] = deal_id
+                state["active_tp"]      = active_tp
+                state["active_sl"]      = active_sl
+                state["active_dir"]     = filled_dir
+                state["orders_placed"]  = t2_oid is not None
+                state["buy_skipped"]    = False   # no longer relevant once T1 is live
+                state["sell_skipped"]   = False
+                save_state(state)
+                time.sleep(CHECK_FAST)
+                continue
+
+            # ── Step 6: T2 reversal — place stop order if not pre-armed ──────
+            elif state["trades_today"] == 1 and state["t1_sl_hit"] \
+                    and not state.get("orders_placed"):
+                t1 = state["t1_direction"]
+
+                if t1 == "BUY":
+                    # T1 BUY SL hit near L → T2 SELL stop just below L
+                    sell_entry = round(L   - STOP_BUFFER, 2)
+                    sell_sl    = round(H_ask + SL_BUFFER, 2)
+                    sell_dist  = round(sell_sl - sell_entry, 2)
+                    sell_tp    = round(sell_entry - RR_RATIO * sell_dist, 2)
+                    sell_size  = compute_size(sell_dist)
+                    log.info(f"  [T2 ORDER] SELL stop @ {sell_entry} | "
+                             f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
+                    oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl,
+                                             sell_tp, sell_size,
+                                             "T2 REVERSAL SELL stop")
+                    if oid:
+                        state["orders_placed"]  = True
+                        state["sell_order_id"]  = oid
+                        state["sell_entry"]     = sell_entry
+                        state["sell_sl"]        = sell_sl
+                        state["sell_tp"]        = sell_tp
+                        state["sell_size"]      = sell_size
+                        state["buy_order_id"]   = None
+                        save_state(state)
+                    else:
+                        # Stop rejected — price likely at sell_entry since T1 BUY SL just hit
+                        # Recalculate TP/size from actual bid to maintain 1:3 R:R at fill price
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_bid = cp2.get("bid", sell_entry)
+                        except Exception:
+                            cur_bid = sell_entry
+                        mkt_sl_dist = round(sell_sl - cur_bid, 2)
+                        mkt_sell_tp   = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
+                        mkt_sell_size = compute_size(mkt_sl_dist)
+                        log.info(f"  [T2 MARKET] SELL fallback recalculated from bid={cur_bid} | "
+                                 f"SL={sell_sl} TP={mkt_sell_tp} sz={mkt_sell_size}")
+                        deal_id = place_market_order(api, "SELL", sell_sl, mkt_sell_tp, mkt_sell_size,
+                                                     "T2 REVERSAL SELL market fallback")
+                        if deal_id:
+                            state["orders_placed"]  = False
+                            state["sell_order_id"]  = None
+                            state["buy_order_id"]   = None
+                            state["trades_today"]   = 2
+                            state["t2_direction"]   = "SELL"
+                            state["active_deal_id"] = deal_id
+                            state["active_tp"]      = mkt_sell_tp
+                            state["active_sl"]      = sell_sl
+                            state["active_dir"]     = "SELL"
+                            save_state(state)
+                            log.info(f"  [FILL] T2 SELL market | dealId={deal_id} | SL={sell_sl} TP={mkt_sell_tp}")
+                        else:
+                            log.error("  [T2 ORDER] SELL stop + market fallback both failed — retrying next cycle")
+
+                elif t1 == "SELL":
+                    # T1 SELL SL hit near H → T2 BUY stop just above H
+                    buy_entry = round(H_ask + STOP_BUFFER, 2)
+                    buy_sl    = round(L - SL_BUFFER, 2)
+                    buy_dist  = round(buy_entry - buy_sl, 2)
+                    buy_tp    = round(buy_entry + RR_RATIO * buy_dist, 2)
+                    buy_size  = compute_size(buy_dist)
+                    log.info(f"  [T2 ORDER] BUY stop @ {buy_entry} | "
+                             f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
+                    oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl,
+                                             buy_tp, buy_size,
+                                             "T2 REVERSAL BUY stop")
+                    if oid:
+                        state["orders_placed"]  = True
+                        state["buy_order_id"]   = oid
+                        state["buy_entry"]      = buy_entry
+                        state["buy_sl"]         = buy_sl
+                        state["buy_tp"]         = buy_tp
+                        state["buy_size"]       = buy_size
+                        state["sell_order_id"]  = None
+                        save_state(state)
+                    else:
+                        # Stop rejected — price likely at buy_entry since T1 SELL SL just hit
+                        # Recalculate TP/size from actual ask to maintain 1:3 R:R at fill price
+                        try:
+                            cp2     = api.get_current_price(EPIC)
+                            cur_ask = cp2.get("offer", buy_entry)
+                        except Exception:
+                            cur_ask = buy_entry
+                        mkt_sl_dist = round(cur_ask - buy_sl, 2)
+                        mkt_buy_tp   = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
+                        mkt_buy_size = compute_size(mkt_sl_dist)
+                        log.info(f"  [T2 MARKET] BUY fallback recalculated from ask={cur_ask} | "
+                                 f"SL={buy_sl} TP={mkt_buy_tp} sz={mkt_buy_size}")
+                        deal_id = place_market_order(api, "BUY", buy_sl, mkt_buy_tp, mkt_buy_size,
+                                                     "T2 REVERSAL BUY market fallback")
+                        if deal_id:
+                            state["orders_placed"]  = False
+                            state["buy_order_id"]   = None
+                            state["sell_order_id"]  = None
+                            state["trades_today"]   = 2
+                            state["t2_direction"]   = "BUY"
+                            state["active_deal_id"] = deal_id
+                            state["active_tp"]      = mkt_buy_tp
+                            state["active_sl"]      = buy_sl
+                            state["active_dir"]     = "BUY"
+                            save_state(state)
+                            log.info(f"  [FILL] T2 BUY market | dealId={deal_id} | SL={buy_sl} TP={mkt_buy_tp}")
+                        else:
+                            log.error("  [T2 ORDER] BUY stop + market fallback both failed — retrying next cycle")
+
+            # ── Step 7: Monitor T2 stop order for fill ────────────────────
+            elif state["trades_today"] == 1 and state["t1_sl_hit"] \
+                    and state.get("orders_placed"):
+                active_ids = get_gold_working_order_ids(api)
+                if active_ids is None:
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                t1         = state["t1_direction"]
+                pos        = get_gold_position(api)
+                filled_dir = None
+                active_sl  = None
+                active_tp  = None
+                oid        = state.get("sell_order_id") if t1 == "BUY" else state.get("buy_order_id")
+
+                if oid and oid not in active_ids and pos is not None:
+                    filled_dir = "SELL" if t1 == "BUY" else "BUY"
+                    active_sl  = state["sell_sl"] if t1 == "BUY" else state["buy_sl"]
+                    active_tp  = state["sell_tp"] if t1 == "BUY" else state["buy_tp"]
+                elif oid and oid not in active_ids and pos is None:
+                    # T2 stop filled AND position already closed before this cycle
+                    t2_dir = "SELL" if t1 == "BUY" else "BUY"
+                    log.info(f"  [RESULT] T2 {t2_dir} filled & closed before detection — SL ❌ — done for day")
+                    state["trades_today"]   = 2
+                    state["t2_direction"]   = t2_dir
+                    state["t2_sl_hit"]      = True
+                    state["done_for_day"]   = True
+                    state["orders_placed"]  = False
+                    state["buy_order_id"]   = None
+                    state["sell_order_id"]  = None
+                    save_state(state)
+                    time.sleep(CHECK_FAST)
+                    continue
+                else:
+                    entry_lvl = state.get("sell_entry") if t1 == "BUY" else state.get("buy_entry")
+                    log.info(f"  [WAIT] T2 stop order live | "
+                             f"{'SELL' if t1 == 'BUY' else 'BUY'}@{entry_lvl}")
+                    time.sleep(CHECK_FAST)
+                    continue
+
+                deal_id    = pos["position"]["dealId"]
+                fill_price = pos["position"].get("openLevel", "?")
+                log.info(f"  [FILL] T2 {filled_dir} stop filled @ {fill_price} | "
+                         f"dealId={deal_id} | SL={active_sl} TP={active_tp}")
+
+                state["trades_today"]   = 2
+                state["t2_direction"]   = filled_dir
+                state["active_deal_id"] = deal_id
+                state["active_tp"]      = active_tp
+                state["active_sl"]      = active_sl
+                state["active_dir"]     = filled_dir
+                state["t1_sl_hit"]      = False
+                state["orders_placed"]  = False
+                state["buy_order_id"]   = None
+                state["sell_order_id"]  = None
+                save_state(state)
+
+        except Exception as e:
+            log.error(f"Cycle error: {e}", exc_info=True)
+
+        # Fast polling once candle is captured, slow before
+        time.sleep(CHECK_FAST if state.get("candle_high") else CHECK_EVERY)
 
 
 if __name__ == "__main__":
-    main()
+    run()

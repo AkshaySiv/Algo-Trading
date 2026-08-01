@@ -452,6 +452,44 @@ class CapitalComAPI:
         resp.raise_for_status()
         return resp.json()
 
+    def place_stop_order(self, epic: str, direction: str, size: float,
+                         level: float, stop_level: Optional[float] = None,
+                         profit_level: Optional[float] = None) -> dict:
+        """
+        Place a stop entry order that triggers when price breaks through ``level``.
+
+        A BUY stop is used above the current price for an upside breakout and a
+        SELL stop below the current price for a downside breakout.
+        """
+        self._ensure_session()
+        payload = {
+            "epic": epic,
+            "direction": direction.upper(),
+            "size": size,
+            "level": level,
+            "type": "STOP",
+        }
+        if stop_level is not None:
+            payload["stopLevel"] = stop_level
+        if profit_level is not None:
+            payload["profitLevel"] = profit_level
+
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/workingorders",
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            result = resp.json()
+            logger.info(
+                f"Stop order placed: {direction} {size} {epic} @ {level} | "
+                f"dealRef={result.get('dealReference')}"
+            )
+            return result
+
+        logger.error(f"Place stop order failed: {resp.status_code} — {resp.text}")
+        resp.raise_for_status()
+
     def get_working_orders(self) -> list:
         """Get all pending working orders."""
         self._ensure_session()
