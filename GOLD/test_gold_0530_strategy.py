@@ -14,6 +14,7 @@ Usage:
     python3 test_gold_0530_strategy.py --month 2026-03
     python3 test_gold_0530_strategy.py --month 2026-03 --month 2026-04
     python3 test_gold_0530_strategy.py --year 2026
+    python3 test_gold_0530_strategy.py --year 2026 --min-range 2.0 --no-t2
 """
 
 import argparse
@@ -135,7 +136,14 @@ def fetch_replay_bars(api, sim_date: date) -> list:
 
 
 # ── Simulator ──────────────────────────────────────────────────────────────────
-def simulate_day(api, sim_date: date, balance: float) -> float:
+def simulate_day(
+    api,
+    sim_date: date,
+    balance: float,
+    *,
+    min_range: float = 0.0,
+    enable_t2: bool = True,
+) -> float:
     date_str = sim_date.strftime("%Y-%m-%d")
     _, candle_close_utc = strategy_candle_window(sim_date)
     ist_label = candle_ist_label(sim_date)
@@ -155,6 +163,13 @@ def simulate_day(api, sim_date: date, balance: float) -> float:
     R     = candle["range"]
     print(f"  [CANDLE] {ist_label} | H={H} (ask={H_ask})  L={L}  Range={R} pts")
     print(f"  [LEVELS] BUY trigger > {H_ask + STOP_BUFFER:.2f}  |  SELL trigger < {L - STOP_BUFFER:.2f}")
+
+    if R < min_range:
+        print(
+            f"  [SKIP] Opening range {R:.2f} pts is below the "
+            f"minimum {min_range:.2f} pts"
+        )
+        return balance
 
     try:
         bars = fetch_replay_bars(api, sim_date)
@@ -225,14 +240,15 @@ def simulate_day(api, sim_date: date, balance: float) -> float:
                     f"    ❌ SL HIT @ {active_sl:.2f}  |  -AED {abs(pnl):.2f} ({pnl_pct:.1f}%)  |  ts={ts}")
                 active_entry = None
 
-                if trades_today == 1:
+                if trades_today == 1 and enable_t2:
                     t1_sl_hit = True
                 else:
                     done_for_day = True
                 continue
 
         # ── Entry logic ────────────────────────────────────────────────────────
-        if done_for_day or trades_today >= 2:
+        max_trades_today = 2 if enable_t2 else 1
+        if done_for_day or trades_today >= max_trades_today:
             continue
 
         if trades_today == 0:
@@ -280,7 +296,7 @@ def simulate_day(api, sim_date: date, balance: float) -> float:
                     f"  [{label}] Entry={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
                     f"Size={size}  SL-dist={sl_dist:.2f}pts  |  ts={ts}")
 
-        elif trades_today == 1 and t1_sl_hit:
+        elif trades_today == 1 and t1_sl_hit and enable_t2:
             if t1_direction == "BUY":
                 # T1 BUY SL hit near L → T2 SELL at candle L boundary
                 t2_entry  = round(L   - STOP_BUFFER, 2)
@@ -341,7 +357,14 @@ def main():
                         help="Full month (YYYY-MM). Runs all weekdays. Repeatable.")
     parser.add_argument("--year",  action="append", default=[],
                         help="Full year (YYYY). Runs all weekdays. Repeatable.")
+    parser.add_argument("--min-range", type=float, default=0.0,
+                        help="Skip a day when the 05:30 IST candle range is below this many points. Default: 0.0.")
+    parser.add_argument("--no-t2", action="store_true",
+                        help="Use T1 only: do not open the opposite-side T2 reversal after a T1 stop-out.")
     args = parser.parse_args()
+
+    if args.min_range < 0:
+        parser.error("--min-range must be zero or greater")
 
     if not args.date and not args.month and not args.year:
         parser.error("Provide at least one --date, --month, or --year")
@@ -387,6 +410,8 @@ def main():
 
     print(f"\nGOLD 5:30 AM IST — Historical Dry-Run Simulator")
     print(f"Starting balance: AED {balance:,.2f}")
+    print(f"Minimum opening range: {args.min_range:.2f} points")
+    print(f"T2 reversal: {'disabled (T1 only)' if args.no_t2 else 'enabled'}")
     print(f"Simulating {len(dates)} trading day(s)\n")
 
     monthly_start: dict = {}
@@ -396,7 +421,13 @@ def main():
         month_key = sim_date.strftime("%Y-%m")
         if month_key not in monthly_start:
             monthly_start[month_key] = balance
-        balance = simulate_day(api, sim_date, balance)
+        balance = simulate_day(
+            api,
+            sim_date,
+            balance,
+            min_range=args.min_range,
+            enable_t2=not args.no_t2,
+        )
         monthly_end[month_key] = balance
         time.sleep(1)  # avoid hammering API
 
