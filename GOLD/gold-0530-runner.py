@@ -21,12 +21,8 @@ import logging
 import json
 import os
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 from datetime import datetime, timezone, timedelta, date
-try:
-    from zoneinfo import ZoneInfo  # Python 3.9+
-except ImportError:
-    from backports.zoneinfo import ZoneInfo  # Python 3.8 fallback
 from capitalcom_api import CapitalComAPI
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -45,9 +41,12 @@ USD_TO_AED = 3.67            # USD-to-AED conversion assumption for fixed-risk s
 STATE_FILE = "state/gold_0530_runner_state.json"
 
 # ── Timezones ─────────────────────────────────────────────────────────────────
-IST = ZoneInfo("Asia/Kolkata")
+# India Standard Time is always UTC+05:30 and does not observe daylight saving
+# time.  A fixed offset removes the Python 3.9+ ``zoneinfo`` dependency while
+# preserving the required 05:30 AM India-time reference candle.
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
-def strategy_candle_window(d: date) -> tuple[datetime, datetime]:
+def strategy_candle_window(d: date) -> Tuple[datetime, datetime]:
     """Return the 5:30–6:00 AM IST reference candle as UTC boundaries."""
     candle_open_ist = datetime(d.year, d.month, d.day, 5, 30, tzinfo=IST)
     candle_close_ist = candle_open_ist + timedelta(minutes=30)

@@ -25,8 +25,7 @@ import calendar
 import os
 import time
 from datetime import date, datetime, time as clock_time, timedelta, timezone
-from typing import Optional
-from zoneinfo import ZoneInfo
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -47,7 +46,9 @@ START_CAPITAL = 4000.0       # Set to None to initialize from the account balanc
 
 ENTRY_TIME_IST = clock_time(5, 30)
 CANDLE_MINUTES = 30
-IST = ZoneInfo("Asia/Kolkata")
+# India Standard Time is always UTC+05:30 and does not observe daylight saving
+# time.  This fixed offset avoids requiring the Python 3.9+ zoneinfo module.
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 UTC = timezone.utc
 
 
@@ -60,7 +61,7 @@ DEMO_MODE = os.getenv("CAPITAL_DEMO", "true").lower() == "true"
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
-def strategy_candle_window(sim_date: date) -> tuple[datetime, datetime]:
+def strategy_candle_window(sim_date: date) -> Tuple[datetime, datetime]:
     """Return the reference candle's inclusive UTC start and exclusive UTC end."""
     candle_open_ist = datetime.combine(sim_date, ENTRY_TIME_IST, tzinfo=IST)
     candle_open_utc = candle_open_ist.astimezone(UTC)
@@ -242,7 +243,7 @@ def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
     active_tp: Optional[float] = None
     active_size: Optional[float] = None
     active_dir: Optional[str] = None
-    trade_log: list[str] = []
+    trade_log: List[str] = []
 
     def settle_active_trade(outcome: str, timestamp: str, *, entry_bar: bool) -> None:
         """Record a TP/SL outcome and update the two-trade replay state."""
@@ -479,7 +480,7 @@ def main() -> None:
         parser.error("Provide at least one --date, --month, or --year")
 
     today = date.today()
-    dates: list[date] = []
+    dates: List[date] = []
 
     for date_argument in args.date:
         dates.append(datetime.strptime(date_argument, "%Y-%m-%d").date())
@@ -522,8 +523,8 @@ def main() -> None:
     print(f"Starting balance: AED {balance:,.2f}")
     print(f"Simulating {len(dates)} trading day(s)\n")
 
-    monthly_start: dict[str, float] = {}
-    monthly_end: dict[str, float] = {}
+    monthly_start = {}
+    monthly_end = {}
 
     for sim_date in dates:
         month_key = sim_date.strftime("%Y-%m")

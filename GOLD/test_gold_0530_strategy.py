@@ -23,8 +23,7 @@ import sys
 import os
 import calendar
 from datetime import datetime, timezone, timedelta, date
-from typing import Optional
-from zoneinfo import ZoneInfo
+from typing import Optional, Tuple
 from dotenv import load_dotenv
 
 from capitalcom_api import CapitalComAPI
@@ -40,10 +39,12 @@ SL_BUFFER = 0.0
 PIP_VALUE_USD = 1.0          # Verify against the Capital.com GOLD contract.
 USD_TO_AED = 3.67
 START_CAPITAL = 4000.0       # Set to None to initialize from account balance.
-IST = ZoneInfo("Asia/Kolkata")
+# India Standard Time is always UTC+05:30 and does not observe daylight saving
+# time. This fixed offset avoids requiring the Python 3.9+ zoneinfo module.
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 
-def strategy_candle_window(sim_date: date) -> tuple[datetime, datetime]:
+def strategy_candle_window(sim_date: date) -> Tuple[datetime, datetime]:
     """Return the 05:30–06:00 IST reference candle as UTC boundaries."""
     candle_open_ist = datetime(
         sim_date.year, sim_date.month, sim_date.day, 5, 30, tzinfo=IST
