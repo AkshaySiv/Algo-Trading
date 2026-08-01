@@ -150,6 +150,44 @@ def fetch_replay_bars(api: CapitalComAPI, sim_date: date) -> list:
     return response.json().get("prices", [])
 
 
+def determine_exit_outcome(
+    direction: str,
+    entry: float,
+    stop: float,
+    target: float,
+    bar_high_bid: float,
+    bar_high_ask: float,
+    bar_low_bid: float,
+    bar_open: float,
+) -> Optional[str]:
+    """
+    Return ``TP`` or ``SL`` when an active position's target or stop was crossed.
+
+    A 30-minute OHLC bar cannot reveal the intrabar sequence when both levels
+    are crossed. In that case, preserve the GER40 convention: resolve a BUY as
+    TP-first only when the bar opened at/above entry, and a SELL as TP-first
+    only when it opened at/below entry. Otherwise resolve the stop first.
+    """
+    sl_hit = (
+        (direction == "BUY" and bar_low_bid <= stop)
+        or (direction == "SELL" and bar_high_ask >= stop)
+    )
+    tp_hit = (
+        (direction == "BUY" and bar_high_bid >= target)
+        or (direction == "SELL" and bar_low_bid <= target)
+    )
+
+    if sl_hit and tp_hit:
+        if direction == "BUY":
+            return "TP" if bar_open >= entry else "SL"
+        return "TP" if bar_open <= entry else "SL"
+    if tp_hit:
+        return "TP"
+    if sl_hit:
+        return "SL"
+    return None
+
+
 # ── Simulator ─────────────────────────────────────────────────────────────────
 def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
     """Run the GER40-style two-trade breakout replay for one GOLD trading day."""
@@ -206,6 +244,59 @@ def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
     active_dir: Optional[str] = None
     trade_log: list[str] = []
 
+    def settle_active_trade(outcome: str, timestamp: str, *, entry_bar: bool) -> None:
+        """Record a TP/SL outcome and update the two-trade replay state."""
+        nonlocal active_dir, active_entry, active_size, active_sl, active_tp
+        nonlocal balance, done_for_day, t1_sl_hit
+
+        assert active_entry is not None
+        assert active_sl is not None
+        assert active_tp is not None
+        assert active_size is not None
+
+        if outcome == "TP":
+            close_level = active_tp
+            pnl = (
+                abs(close_level - active_entry)
+                * active_size
+                * PIP_VALUE_USD
+                * USD_TO_AED
+            )
+            pnl_pct = (pnl / balance) * 100 if balance else 0.0
+            balance += pnl
+            trade_log.append(
+                f"    ✅ TP HIT @ {close_level:.2f}  |  +AED {pnl:.2f} "
+                f"(+{pnl_pct:.1f}%)  |  ts={timestamp}"
+            )
+            done_for_day = True
+        elif outcome == "SL":
+            close_level = active_sl
+            pnl = -(
+                abs(close_level - active_entry)
+                * active_size
+                * PIP_VALUE_USD
+                * USD_TO_AED
+            )
+            pnl_pct = (pnl / balance) * 100 if balance else 0.0
+            balance += pnl
+            hit_note = " (entry-bar reversal)" if entry_bar else ""
+            trade_log.append(
+                f"    ❌ SL HIT @ {close_level:.2f}{hit_note}  |  -AED {abs(pnl):.2f} "
+                f"({pnl_pct:.1f}%)  |  ts={timestamp}"
+            )
+            if trades_today == 1:
+                t1_sl_hit = True
+            else:
+                done_for_day = True
+        else:
+            raise ValueError(f"Unsupported trade outcome: {outcome}")
+
+        active_entry = None
+        active_sl = None
+        active_tp = None
+        active_size = None
+        active_dir = None
+
     for bar in bars:
         if done_for_day:
             break
@@ -216,70 +307,29 @@ def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
         bar_low_bid = bar["lowPrice"]["bid"]
         bar_open = bar["openPrice"]["bid"]
 
-        # ── Monitor active trade ───────────────────────────────────────────────
+        # ── Monitor an active trade from an earlier replay bar ────────────────
         if active_entry is not None:
             assert active_sl is not None
             assert active_tp is not None
-            assert active_size is not None
             assert active_dir is not None
 
-            sl_hit = (
-                (active_dir == "BUY" and bar_low_bid <= active_sl)
-                or (active_dir == "SELL" and bar_high_ask >= active_sl)
+            outcome = determine_exit_outcome(
+                active_dir,
+                active_entry,
+                active_sl,
+                active_tp,
+                bar_high_bid,
+                bar_high_ask,
+                bar_low_bid,
+                bar_open,
             )
-            tp_hit = (
-                (active_dir == "BUY" and bar_high_bid >= active_tp)
-                or (active_dir == "SELL" and bar_low_bid <= active_tp)
-            )
-
-            # Both hit in one bar: use the opening price to assign the first hit.
-            if sl_hit and tp_hit:
-                if active_dir == "BUY":
-                    tp_hit = bar_open >= active_entry
-                    sl_hit = not tp_hit
-                else:
-                    tp_hit = bar_open <= active_entry
-                    sl_hit = not tp_hit
-
-            if tp_hit:
-                pnl = (
-                    abs(active_tp - active_entry)
-                    * active_size
-                    * PIP_VALUE_USD
-                    * USD_TO_AED
-                )
-                pnl_pct = (pnl / balance) * 100 if balance else 0.0
-                balance += pnl
-                trade_log.append(
-                    f"    TP HIT @ {active_tp:.2f}  |  +AED {pnl:.2f} "
-                    f"(+{pnl_pct:.1f}%)  |  ts={timestamp}"
-                )
-                active_entry = None
-                done_for_day = True
-                continue
-
-            if sl_hit:
-                pnl = -(
-                    abs(active_sl - active_entry)
-                    * active_size
-                    * PIP_VALUE_USD
-                    * USD_TO_AED
-                )
-                pnl_pct = (pnl / balance) * 100 if balance else 0.0
-                balance += pnl
-                trade_log.append(
-                    f"    SL HIT @ {active_sl:.2f}  |  -AED {abs(pnl):.2f} "
-                    f"({pnl_pct:.1f}%)  |  ts={timestamp}"
-                )
-                active_entry = None
-
-                if trades_today == 1:
-                    t1_sl_hit = True
-                else:
-                    done_for_day = True
+            if outcome is not None:
+                settle_active_trade(outcome, timestamp, entry_bar=False)
+                # A T2 reversal is deliberately armed on the next replay bar.
                 continue
 
         # ── Entry logic ─────────────────────────────────────────────────────────
+        opened_this_bar = False
         if done_for_day or trades_today >= 2:
             continue
 
@@ -306,6 +356,7 @@ def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
                 active_size = size
                 active_dir = "BUY"
                 trades_today = 1
+                opened_this_bar = True
                 trade_log.append(
                     f"  [{label}] Entry={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
                     f"Size={size}  SL-dist={sl_distance:.2f}pts  |  ts={timestamp}"
@@ -325,6 +376,7 @@ def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
                 active_size = size
                 active_dir = "SELL"
                 trades_today = 1
+                opened_this_bar = True
                 trade_log.append(
                     f"  [{label}] Entry={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
                     f"Size={size}  SL-dist={sl_distance:.2f}pts  |  ts={timestamp}"
@@ -354,11 +406,31 @@ def simulate_day(api: CapitalComAPI, sim_date: date, balance: float) -> float:
             active_size = compute_size(t2_sl_distance)
             trades_today = 2
             t1_sl_hit = False
+            opened_this_bar = True
             trade_log.append(
                 f"  [{label}] Entry={t2_entry:.2f}  SL={t2_sl:.2f}  "
                 f"TP={t2_tp:.2f}  Size={active_size}  "
                 f"SL-dist={t2_sl_distance:.2f}pts  |  ts={timestamp}"
             )
+
+        # A position opened by a breakout can hit its TP or SL inside the very
+        # same 30-minute candle. Evaluate it before moving to the next bar.
+        if opened_this_bar and active_entry is not None:
+            assert active_sl is not None
+            assert active_tp is not None
+            assert active_dir is not None
+            outcome = determine_exit_outcome(
+                active_dir,
+                active_entry,
+                active_sl,
+                active_tp,
+                bar_high_bid,
+                bar_high_ask,
+                bar_low_bid,
+                bar_open,
+            )
+            if outcome is not None:
+                settle_active_trade(outcome, timestamp, entry_bar=True)
 
     # ── End of day: close any simulated position at the final replay-bar close ─
     if active_entry is not None:
