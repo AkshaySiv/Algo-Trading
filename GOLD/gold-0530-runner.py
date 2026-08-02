@@ -21,13 +21,14 @@ import logging
 import json
 import os
 import sys
+from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Tuple
 from datetime import datetime, timezone, timedelta, date
 from capitalcom_api import CapitalComAPI
 
 # ── Config ────────────────────────────────────────────────────────────────────
 EPIC = "GOLD"                # Capital.com GOLD epic; verify for the account.
-FIXED_SL_AED = 40.0          # Fixed risk per trade in AED.
+RISK_PER_TRADE_AED = 40.0    # Maximum planned loss for each T1 or T2 trade.
 RR_RATIO = 3.0               # 1:3 reward-to-risk.
 STOP_BUFFER = 1.0            # Points beyond the candle H/L for an entry trigger.
 SL_BUFFER = 0.0              # Extra points beyond candle H/L for the stop.
@@ -38,6 +39,12 @@ CHECK_EVERY = 30             # Seconds between scans before the reference candle
 CHECK_FAST = 0.5             # Seconds between scans while waiting for breakout activity.
 PIP_VALUE_USD = 1.0          # GOLD point value in USD per unit; verify with Capital.com.
 USD_TO_AED = 3.67            # USD-to-AED conversion assumption for fixed-risk sizing.
+# Safe fallback values confirmed from the Capital.com GOLD market metadata.
+# The live runner refreshes them from GET /markets/GOLD at startup.
+DEFAULT_MIN_DEAL_SIZE = 0.01
+DEFAULT_SIZE_INCREMENT = 0.01
+BROKER_MIN_DEAL_SIZE = DEFAULT_MIN_DEAL_SIZE
+BROKER_SIZE_INCREMENT = DEFAULT_SIZE_INCREMENT
 STATE_FILE = "state/gold_0530_runner_state.json"
 
 # ── Timezones ─────────────────────────────────────────────────────────────────
@@ -188,9 +195,55 @@ def fetch_0530_candle(api: CapitalComAPI, candle_date_str: str) -> Optional[dict
 
 
 # ── Position sizing ───────────────────────────────────────────────────────────
-def compute_size(sl_distance: float) -> float:
-    size = FIXED_SL_AED / (sl_distance * PIP_VALUE_USD * USD_TO_AED)
-    return round(max(0.1, round(size, 1)), 1)
+def get_deal_size_constraints(api: CapitalComAPI) -> Tuple[float, float]:
+    """Return current broker minimum deal size and permitted size increment."""
+    market = api.get_market_details(EPIC)
+    rules = market.get("dealingRules", {})
+    min_size = float(rules.get("minDealSize", {}).get("value", 0))
+    size_step = float(rules.get("minSizeIncrement", {}).get("value", 0))
+    if min_size <= 0 or size_step <= 0:
+        raise RuntimeError("Capital.com returned invalid GOLD deal-size constraints")
+    return min_size, size_step
+
+
+def compute_size(sl_distance: float) -> Optional[float]:
+    """Return a broker-valid size with planned stop-loss at or below AED 40."""
+    if sl_distance <= 0:
+        log.warning("  [RISK] Invalid non-positive stop distance — order skipped")
+        return None
+
+    risk_budget = Decimal(str(RISK_PER_TRADE_AED))
+    denominator = (
+        Decimal(str(sl_distance))
+        * Decimal(str(PIP_VALUE_USD))
+        * Decimal(str(USD_TO_AED))
+    )
+    raw_size = risk_budget / denominator
+    step = Decimal(str(BROKER_SIZE_INCREMENT))
+    size = (raw_size / step).to_integral_value(rounding=ROUND_DOWN) * step
+    min_size = Decimal(str(BROKER_MIN_DEAL_SIZE))
+
+    if size < min_size:
+        log.warning(
+            "  [RISK] Skip: minimum size %.3f would exceed AED %.2f risk "
+            "for %.2f-point stop",
+            BROKER_MIN_DEAL_SIZE, RISK_PER_TRADE_AED, sl_distance,
+        )
+        return None
+
+    planned_risk = size * denominator
+    if planned_risk > risk_budget:
+        log.warning(
+            "  [RISK] Skip: rounded size %.6f would risk AED %.2f, above cap AED %.2f",
+            float(size), float(planned_risk), RISK_PER_TRADE_AED,
+        )
+        return None
+
+    log.info(
+        "  [RISK] stop=%.2fpts | size=%.6f | planned risk=AED %.2f (cap=AED %.2f)",
+        sl_distance, float(size), float(planned_risk), RISK_PER_TRADE_AED,
+    )
+    return float(size)
 
 
 # ── Active position check ─────────────────────────────────────────────────────
@@ -242,6 +295,9 @@ def place_breakout_stop(api: CapitalComAPI, direction: str, entry_level: float,
     Place a stop working order for breakout entry.
     Returns the working-order dealId on acceptance, None on failure.
     """
+    if size is None:
+        log.warning(f"  [RISK] {label} skipped — no broker-valid size within AED {RISK_PER_TRADE_AED:.2f} cap")
+        return None
     log.info(f"  [STOP ORDER] {direction} @ {entry_level} | SL={sl} TP={tp} size={size} | {label}")
     try:
         r = api.place_stop_order(
@@ -267,6 +323,9 @@ def place_market_order(api: CapitalComAPI, direction: str, sl: float,
     Place a market order (immediate fill) as fallback when stop order is rejected.
     Returns the position dealId on success, None on failure.
     """
+    if size is None:
+        log.warning(f"  [RISK] {label} market fallback skipped — no broker-valid size within AED {RISK_PER_TRADE_AED:.2f} cap")
+        return None
     log.warning(f"  [MARKET FALLBACK] Placing MARKET {direction} | SL={sl} TP={tp} size={size} | {label}")
     try:
         r = api.open_position(
@@ -288,13 +347,30 @@ def place_market_order(api: CapitalComAPI, direction: str, sl: float,
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def run():
+    global BROKER_MIN_DEAL_SIZE, BROKER_SIZE_INCREMENT
+
     api = CapitalComAPI(
         api_key=CAPITAL_API_KEY,
         identifier=CAPITAL_IDENTIFIER,
         password=CAPITAL_PASSWORD,
         demo=DEMO_MODE
     )
-    api.create_session()
+    if not api.create_session():
+        log.critical("Could not create Capital.com session — runner stopped")
+        return
+
+    try:
+        BROKER_MIN_DEAL_SIZE, BROKER_SIZE_INCREMENT = get_deal_size_constraints(api)
+    except Exception as error:
+        # Fail closed: do not submit an order if the broker's current constraints
+        # cannot be verified for the instrument.
+        log.critical(f"Could not load GOLD deal-size constraints — runner stopped: {error}")
+        try:
+            api.delete_session()
+        except Exception:
+            pass
+        return
+
     acc     = api.get_account_info()
     balance = acc.get('balance', {}).get('balance', 0)
     mode    = "DEMO" if DEMO_MODE else "LIVE"
@@ -302,6 +378,8 @@ def run():
     log.info("  GOLD 5:30 AM IST Runner — STARTED")
     log.info(f"  Account: CFD | Currency: AED | Mode: {mode}")
     log.info(f"  Balance: AED {balance:,.2f}")
+    log.info(f"  Risk cap: AED {RISK_PER_TRADE_AED:.2f} per trade")
+    log.info(f"  GOLD deal size: min={BROKER_MIN_DEAL_SIZE} | increment={BROKER_SIZE_INCREMENT}")
     log.info("=" * 60)
 
     state = load_state()
@@ -535,6 +613,13 @@ def run():
                 sell_dist = round(sell_sl - sell_entry, 2)
                 sell_tp   = round(sell_entry - RR_RATIO * sell_dist, 2)
                 sell_size = compute_size(sell_dist)
+
+                if buy_size is None and sell_size is None:
+                    log.warning("  [RISK] Both T1 sides exceed the AED %.2f cap — done for day", RISK_PER_TRADE_AED)
+                    state["done_for_day"] = True
+                    save_state(state)
+                    time.sleep(CHECK_EVERY)
+                    continue
 
                 log.info(f"  [ORDERS] Placing breakout stop orders | "
                          f"BUY@{buy_entry} SL={buy_sl} TP={buy_tp} sz={buy_size} | "
@@ -903,6 +988,12 @@ def run():
                     sell_dist  = round(sell_sl - sell_entry, 2)
                     sell_tp    = round(sell_entry - RR_RATIO * sell_dist, 2)
                     sell_size  = compute_size(sell_dist)
+                    if sell_size is None:
+                        log.warning("  [RISK] T2 SELL exceeds the AED %.2f cap — done for day", RISK_PER_TRADE_AED)
+                        state["t1_sl_hit"] = False
+                        state["done_for_day"] = True
+                        save_state(state)
+                        continue
                     log.info(f"  [T2 ORDER] SELL stop @ {sell_entry} | "
                              f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
                     oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl,
@@ -954,6 +1045,12 @@ def run():
                     buy_dist  = round(buy_entry - buy_sl, 2)
                     buy_tp    = round(buy_entry + RR_RATIO * buy_dist, 2)
                     buy_size  = compute_size(buy_dist)
+                    if buy_size is None:
+                        log.warning("  [RISK] T2 BUY exceeds the AED %.2f cap — done for day", RISK_PER_TRADE_AED)
+                        state["t1_sl_hit"] = False
+                        state["done_for_day"] = True
+                        save_state(state)
+                        continue
                     log.info(f"  [T2 ORDER] BUY stop @ {buy_entry} | "
                              f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
                     oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl,
