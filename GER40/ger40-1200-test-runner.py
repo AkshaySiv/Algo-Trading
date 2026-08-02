@@ -17,8 +17,9 @@ import time
 import sys
 import os
 import calendar
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone, timedelta, date
-from typing import Optional
+from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -29,12 +30,16 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'), override=True)
 
 # ── Config (must match runner) ────────────────────────────────────────────────
 EPIC           = "DE40"
-FIXED_SL_AED   = 40.0      # simulation risk per trade in AED (adjust for your backtesting capital)
+RISK_PER_TRADE_AED = 40.0  # Maximum planned loss for each T1 or T2 trade.
 RR_RATIO       = 3.0
 STOP_BUFFER    = 1.0          # points beyond candle H/L for entry trigger
 SL_BUFFER      = 0.0
 PIP_VALUE_EUR  = 1.0
 EUR_TO_AED     = 3.97
+# Safe fallback values confirmed from the Capital.com DE40 market metadata.
+# The runner refreshes them from GET /markets/DE40 before a historical replay.
+DEFAULT_MIN_DEAL_SIZE = 0.001
+DEFAULT_SIZE_INCREMENT = 0.001
 START_CAPITAL  = 4000.0    # starting capital in AED for simulation (set None to use live balance)
 IST    = timezone(timedelta(hours=5, minutes=30))
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -70,9 +75,51 @@ DEMO_MODE          = os.getenv('CAPITAL_DEMO', 'true').lower() == 'true'
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-def compute_size(sl_distance: float) -> float:
-    size = FIXED_SL_AED / (sl_distance * PIP_VALUE_EUR * EUR_TO_AED)
-    return round(max(0.1, round(size, 1)), 1)
+def get_deal_size_constraints(api: CapitalComAPI) -> Tuple[float, float]:
+    """Return current broker minimum deal size and permitted size increment."""
+    market = api.get_market_details(EPIC)
+    rules = market.get("dealingRules", {})
+    min_size = float(rules.get("minDealSize", {}).get("value", 0))
+    size_step = float(rules.get("minSizeIncrement", {}).get("value", 0))
+    if min_size <= 0 or size_step <= 0:
+        raise RuntimeError("Capital.com returned invalid DE40 deal-size constraints")
+    return min_size, size_step
+
+
+def compute_size(
+    sl_distance: float,
+    min_deal_size: float = DEFAULT_MIN_DEAL_SIZE,
+    size_increment: float = DEFAULT_SIZE_INCREMENT,
+) -> Tuple[Optional[float], float, Optional[str]]:
+    """Return a broker-valid size whose planned stop-loss is never above AED 40."""
+    if sl_distance <= 0:
+        return None, 0.0, "invalid non-positive stop distance"
+    if min_deal_size <= 0 or size_increment <= 0:
+        return None, 0.0, "invalid broker deal-size constraint"
+
+    risk_budget = Decimal(str(RISK_PER_TRADE_AED))
+    denominator = (
+        Decimal(str(sl_distance))
+        * Decimal(str(PIP_VALUE_EUR))
+        * Decimal(str(EUR_TO_AED))
+    )
+    raw_size = risk_budget / denominator
+    step = Decimal(str(size_increment))
+    size = (raw_size / step).to_integral_value(rounding=ROUND_DOWN) * step
+    min_size = Decimal(str(min_deal_size))
+
+    if size < min_size:
+        return None, 0.0, (
+            "broker minimum size {:.3f} would exceed AED {:.2f} planned risk"
+        ).format(min_deal_size, RISK_PER_TRADE_AED)
+
+    planned_risk = size * denominator
+    if planned_risk > risk_budget:
+        return None, 0.0, "rounded size exceeds AED {:.2f} planned risk cap".format(
+            RISK_PER_TRADE_AED
+        )
+
+    return float(size), float(planned_risk), None
 
 
 def fetch_candle(api, sim_date: date) -> Optional[dict]:
@@ -136,7 +183,13 @@ def fetch_replay_bars(api, sim_date: date) -> list:
 
 
 # ── Simulator ──────────────────────────────────────────────────────────────────
-def simulate_day(api, sim_date: date, balance: float) -> float:
+def simulate_day(
+    api,
+    sim_date: date,
+    balance: float,
+    min_deal_size: float = DEFAULT_MIN_DEAL_SIZE,
+    size_increment: float = DEFAULT_SIZE_INCREMENT,
+) -> float:
     date_str                         = sim_date.strftime("%Y-%m-%d")
     open_h, open_m, close_h, close_m = candle_utc_hours(sim_date)
     ist_label                        = candle_ist_label(open_h, open_m)
@@ -250,7 +303,13 @@ def simulate_day(api, sim_date: date, balance: float) -> float:
                 entry   = round(H_ask + STOP_BUFFER, 2)   # simulate market fill at breakout level
                 sl      = round(L   - SL_BUFFER, 2)
                 sl_dist = round(entry - sl, 2)
-                size    = compute_size(sl_dist)
+                size, planned_risk, size_error = compute_size(
+                    sl_dist, min_deal_size, size_increment
+                )
+                if size is None:
+                    print(f"  [SKIP] T1 BUY — {size_error}")
+                    done_for_day = True
+                    continue
                 tp      = round(entry + RR_RATIO * sl_dist, 2)
                 label   = "T1 BUY"
                 t1_direction = "BUY"
@@ -262,13 +321,20 @@ def simulate_day(api, sim_date: date, balance: float) -> float:
                 trades_today = 1
                 trade_log.append(
                     f"  [{label}] Entry={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
-                    f"Size={size}  SL-dist={sl_dist:.2f}pts  |  ts={ts}")
+                    f"Size={size}  Risk=AED {planned_risk:.2f}  "
+                    f"SL-dist={sl_dist:.2f}pts  |  ts={ts}")
 
             elif sell_triggered:
                 entry   = round(L - STOP_BUFFER, 2)       # simulate market fill at breakout level
                 sl      = round(H_ask + SL_BUFFER, 2)
                 sl_dist = round(sl - entry, 2)
-                size    = compute_size(sl_dist)
+                size, planned_risk, size_error = compute_size(
+                    sl_dist, min_deal_size, size_increment
+                )
+                if size is None:
+                    print(f"  [SKIP] T1 SELL — {size_error}")
+                    done_for_day = True
+                    continue
                 tp      = round(entry - RR_RATIO * sl_dist, 2)
                 label   = "T1 SELL"
                 t1_direction = "SELL"
@@ -280,7 +346,8 @@ def simulate_day(api, sim_date: date, balance: float) -> float:
                 trades_today = 1
                 trade_log.append(
                     f"  [{label}] Entry={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
-                    f"Size={size}  SL-dist={sl_dist:.2f}pts  |  ts={ts}")
+                    f"Size={size}  Risk=AED {planned_risk:.2f}  "
+                    f"SL-dist={sl_dist:.2f}pts  |  ts={ts}")
 
         elif trades_today == 1 and t1_sl_hit:
             if t1_direction == "BUY":
@@ -300,15 +367,25 @@ def simulate_day(api, sim_date: date, balance: float) -> float:
                 active_dir   = "BUY"
                 label        = "T2 BUY"
 
+            t2_size, t2_risk, size_error = compute_size(
+                t2_sldist, min_deal_size, size_increment
+            )
+            if t2_size is None:
+                print(f"  [SKIP] {label} — {size_error}")
+                done_for_day = True
+                t1_sl_hit = False
+                continue
+
             active_entry = t2_entry
             active_sl    = t2_sl
             active_tp    = t2_tp
-            active_size  = compute_size(t2_sldist)
+            active_size  = t2_size
             trades_today = 2
             t1_sl_hit    = False
             trade_log.append(
                 f"  [{label}] Entry={t2_entry:.2f}  SL={t2_sl:.2f}  "
-                f"TP={t2_tp:.2f}  Size={active_size}  SL-dist={t2_sldist:.2f}pts  |  ts={ts}")
+                f"TP={t2_tp:.2f}  Size={active_size}  Risk=AED {t2_risk:.2f}  "
+                f"SL-dist={t2_sldist:.2f}pts  |  ts={ts}")
 
     # ── End of day — close any open position at last bar close ─────────────────
     if active_entry is not None:
@@ -379,6 +456,7 @@ def main():
         demo=DEMO_MODE
     )
     api.create_session()
+    min_deal_size, size_increment = get_deal_size_constraints(api)
 
     if START_CAPITAL is not None:
         start_balance = START_CAPITAL
@@ -388,7 +466,10 @@ def main():
     balance = start_balance
 
     print(f"\nGER40 12:00 PM IST — Dry-Run Simulator")
+    print("T2 reversal: ENABLED")
     print(f"Starting balance: AED {balance:,.2f}")
+    print(f"Risk cap per trade: AED {RISK_PER_TRADE_AED:.2f}")
+    print(f"Broker deal size: min={min_deal_size} | increment={size_increment}")
     print(f"Simulating {len(dates)} trading day(s)\n")
 
     monthly_start: dict = {}
@@ -398,7 +479,13 @@ def main():
         month_key = sim_date.strftime("%Y-%m")
         if month_key not in monthly_start:
             monthly_start[month_key] = balance
-        balance = simulate_day(api, sim_date, balance)
+        balance = simulate_day(
+            api,
+            sim_date,
+            balance,
+            min_deal_size=min_deal_size,
+            size_increment=size_increment,
+        )
         monthly_end[month_key] = balance
         time.sleep(1)  # avoid hammering API
 
