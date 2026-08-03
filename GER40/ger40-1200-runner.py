@@ -42,9 +42,11 @@ REENTRY_PRICE_BUFFER = 2.0  # pts: re-arm stop when price returns within this of
 CHECK_EVERY   = 30           # seconds between scans (pre-candle)
 CHECK_FAST    = 0.5          # seconds between scans (post-candle, waiting for breakout)
 PIP_VALUE_EUR = 1.0          # DE40: 1 pt = €1 per unit
-# DE40 P&L is EUR-denominated while the account reports AED P&L. Size from the
-# live EUR/AED offer plus Capital.com's conversion mark-up and a safety buffer.
-EURAED_EPIC = "EURAED"
+# DE40 P&L is EUR-denominated while the account reports AED P&L. Capital.com's
+# demo catalogue does not expose a direct EUR/AED epic, so size from live EUR/USD
+# crossed through the CBUAE USD/AED intervention rate plus a safety buffer.
+EURUSD_EPIC = "EURUSD"
+USD_TO_AED_CONSERVATIVE = 3.673
 BROKER_FX_MARKUP_PCT = 0.007
 FX_SAFETY_BUFFER_PCT = 0.01
 # Safe fallback values confirmed from the Capital.com DE40 market metadata.
@@ -212,18 +214,20 @@ def get_deal_size_constraints(api: CapitalComAPI) -> Tuple[float, float]:
 
 
 def get_conservative_eur_to_aed(api: CapitalComAPI) -> Tuple[float, float]:
-    """Return conservative EUR/AED risk rate and raw broker offer quote.
+    """Return conservative EUR/AED rate and the raw live EUR/USD offer quote.
 
-    The conversion rate includes Capital.com's documented retail conversion mark-up
-    plus an additional sizing buffer. Callers fail closed when the live quote is
-    unavailable rather than risking a trade from a stale static rate.
+    Capital.com's demo market catalogue does not expose a direct EUR/AED epic.
+    Derive EUR/AED from the supported live EUR/USD offer crossed through the
+    conservative CBUAE USD/AED intervention rate, then apply the conversion
+    mark-up and safety buffer. A missing EUR/USD quote fails closed.
     """
-    quote = api.get_current_price(EURAED_EPIC)
-    raw_offer = float(quote.get("offer") or 0)
-    if raw_offer <= 0:
-        raise RuntimeError("Capital.com returned no valid EUR/AED offer quote")
-    conservative_rate = raw_offer * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + FX_SAFETY_BUFFER_PCT)
-    return conservative_rate, raw_offer
+    quote = api.get_current_price(EURUSD_EPIC)
+    raw_eurusd_offer = float(quote.get("offer") or 0)
+    if raw_eurusd_offer <= 0:
+        raise RuntimeError("Capital.com returned no valid EUR/USD offer quote")
+    eur_to_aed_cross = raw_eurusd_offer * USD_TO_AED_CONSERVATIVE
+    conservative_rate = eur_to_aed_cross * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + FX_SAFETY_BUFFER_PCT)
+    return conservative_rate, raw_eurusd_offer
 
 
 def compute_size(sl_distance: float, eur_to_aed: float) -> Optional[float]:
@@ -263,10 +267,11 @@ def compute_size(sl_distance: float, eur_to_aed: float) -> Optional[float]:
         return None
 
     log.info(
-        "  [RISK] stop=%.2fpts | EUR/AED offer=%.5f | risk rate=%.5f | "
-        "size=%.6f | planned risk=AED %.2f (cap=AED %.2f)",
+        "  [RISK] stop=%.2fpts | EUR/USD offer=%.5f | USD/AED cross=%.3f | "
+        "risk rate=%.5f | size=%.6f | planned risk=AED %.2f (cap=AED %.2f)",
         sl_distance,
-        eur_to_aed / ((1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + FX_SAFETY_BUFFER_PCT)),
+        eur_to_aed / (USD_TO_AED_CONSERVATIVE * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + FX_SAFETY_BUFFER_PCT)),
+        USD_TO_AED_CONSERVATIVE,
         eur_to_aed,
         float(size),
         float(planned_risk),
@@ -283,7 +288,7 @@ def compute_size_from_live_fx(api: CapitalComAPI, sl_distance: float, label: str
         log.error("  [RISK] %s skipped — EUR/AED quote unavailable: %s", label, error)
         return None
     log.debug(
-        "  [RISK] %s using EUR/AED offer %.5f, conservative rate %.5f",
+        "  [RISK] %s using EUR/USD offer %.5f, conservative EUR/AED rate %.5f",
         label, raw_offer, eur_to_aed,
     )
     return compute_size(sl_distance, eur_to_aed)

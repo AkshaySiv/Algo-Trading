@@ -36,9 +36,10 @@ STOP_BUFFER    = 1.0          # points beyond candle H/L for entry trigger
 SL_BUFFER      = 0.0
 PIP_VALUE_EUR  = 1.0
 # The broker settles DE40 P&L in EUR and converts it to the AED account currency.
-# Use a live EUR/AED quote plus the documented conversion mark-up and an additional
-# safety buffer; do not use a stale hard-coded EUR/AED conversion rate for sizing.
-EURAED_EPIC = "EURAED"
+# Capital.com's demo catalogue does not expose a direct EUR/AED epic, so derive the
+# rate from a live EUR/USD offer crossed through the CBUAE USD/AED intervention rate.
+EURUSD_EPIC = "EURUSD"
+USD_TO_AED_CONSERVATIVE = 3.673
 BROKER_FX_MARKUP_PCT = 0.007
 FX_SAFETY_BUFFER_PCT = 0.01
 # Safe fallback values confirmed from the Capital.com DE40 market metadata.
@@ -95,19 +96,20 @@ def get_conservative_eur_to_aed(
     api,
     safety_buffer_pct: float = FX_SAFETY_BUFFER_PCT,
 ) -> Tuple[float, float]:
-    """Return a conservative all-in EUR/AED rate and the raw broker offer quote.
+    """Return conservative EUR/AED rate and the raw live EUR/USD offer quote.
 
-    For an EUR-denominated loss in an AED account, use the EUR/AED offer plus the
-    documented broker conversion mark-up and a small additional buffer. If a valid
-    quote cannot be obtained, the caller must fail closed rather than size from a
-    stale FX assumption.
+    The demo market catalogue does not expose a direct EUR/AED market. Derive the
+    EUR/AED cross from EUR/USD multiplied by the conservative CBUAE USD/AED
+    intervention rate, then include Capital.com's documented conversion mark-up
+    and a small additional sizing buffer. A missing EUR/USD quote fails closed.
     """
-    quote = api.get_current_price(EURAED_EPIC)
-    raw_offer = float(quote.get("offer") or 0)
-    if raw_offer <= 0:
-        raise RuntimeError("Capital.com returned no valid EUR/AED offer quote")
-    conservative_rate = raw_offer * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + safety_buffer_pct)
-    return conservative_rate, raw_offer
+    quote = api.get_current_price(EURUSD_EPIC)
+    raw_eurusd_offer = float(quote.get("offer") or 0)
+    if raw_eurusd_offer <= 0:
+        raise RuntimeError("Capital.com returned no valid EUR/USD offer quote")
+    eur_to_aed_cross = raw_eurusd_offer * USD_TO_AED_CONSERVATIVE
+    conservative_rate = eur_to_aed_cross * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + safety_buffer_pct)
+    return conservative_rate, raw_eurusd_offer
 
 
 def compute_size(
@@ -449,9 +451,9 @@ def main():
     parser.add_argument("--year",  action="append", default=[],
                         help="Full year (YYYY). Runs all weekdays. Repeatable.")
     parser.add_argument(
-        "--eur-aed-offer", type=float, default=None,
-        help="Raw EUR/AED offer override for reproducible historical sizing tests. "
-             "Default: fetch live EUR/AED offer from Capital.com."
+        "--eur-usd-offer", type=float, default=None,
+        help="Raw EUR/USD offer override for reproducible historical sizing tests. "
+             "Default: fetch live EUR/USD offer from Capital.com."
     )
     parser.add_argument(
         "--fx-safety-buffer-pct", type=float, default=FX_SAFETY_BUFFER_PCT * 100,
@@ -500,13 +502,16 @@ def main():
     if safety_buffer < 0:
         parser.error("--fx-safety-buffer-pct must be non-negative")
     try:
-        if args.eur_aed_offer is not None:
-            if args.eur_aed_offer <= 0:
-                parser.error("--eur-aed-offer must be positive")
-            raw_eur_to_aed = args.eur_aed_offer
-            eur_to_aed = raw_eur_to_aed * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + safety_buffer)
+        if args.eur_usd_offer is not None:
+            if args.eur_usd_offer <= 0:
+                parser.error("--eur-usd-offer must be positive")
+            raw_eurusd_offer = args.eur_usd_offer
+            eur_to_aed = (
+                raw_eurusd_offer * USD_TO_AED_CONSERVATIVE
+                * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + safety_buffer)
+            )
         else:
-            eur_to_aed, raw_eur_to_aed = get_conservative_eur_to_aed(api, safety_buffer)
+            eur_to_aed, raw_eurusd_offer = get_conservative_eur_to_aed(api, safety_buffer)
     except Exception as error:
         raise SystemExit(
             "Could not obtain a valid EUR/AED quote for risk sizing; replay stopped: {}".format(error)
@@ -523,7 +528,8 @@ def main():
     print("T2 reversal: ENABLED")
     print(f"Starting balance: AED {balance:,.2f}")
     print(f"Risk cap per trade: AED {RISK_PER_TRADE_AED:.2f}")
-    print(f"EUR/AED raw offer: {raw_eur_to_aed:.5f} | risk-sizing rate: {eur_to_aed:.5f} "
+    print(f"EUR/USD raw offer: {raw_eurusd_offer:.5f} | USD/AED cross: {USD_TO_AED_CONSERVATIVE:.3f} "
+          f"| EUR/AED risk-sizing rate: {eur_to_aed:.5f} "
           f"(broker mark-up {BROKER_FX_MARKUP_PCT * 100:.1f}% + "
           f"buffer {safety_buffer * 100:.1f}%)")
     print(f"Broker deal size: min={min_deal_size} | increment={size_increment}")
