@@ -35,7 +35,12 @@ RR_RATIO       = 3.0
 STOP_BUFFER    = 1.0          # points beyond candle H/L for entry trigger
 SL_BUFFER      = 0.0
 PIP_VALUE_EUR  = 1.0
-EUR_TO_AED     = 3.97
+# The broker settles DE40 P&L in EUR and converts it to the AED account currency.
+# Use a live EUR/AED quote plus the documented conversion mark-up and an additional
+# safety buffer; do not use a stale hard-coded EUR/AED conversion rate for sizing.
+EURAED_EPIC = "EURAED"
+BROKER_FX_MARKUP_PCT = 0.007
+FX_SAFETY_BUFFER_PCT = 0.01
 # Safe fallback values confirmed from the Capital.com DE40 market metadata.
 # The runner refreshes them from GET /markets/DE40 before a historical replay.
 DEFAULT_MIN_DEAL_SIZE = 0.001
@@ -86,14 +91,36 @@ def get_deal_size_constraints(api: CapitalComAPI) -> Tuple[float, float]:
     return min_size, size_step
 
 
+def get_conservative_eur_to_aed(
+    api,
+    safety_buffer_pct: float = FX_SAFETY_BUFFER_PCT,
+) -> Tuple[float, float]:
+    """Return a conservative all-in EUR/AED rate and the raw broker offer quote.
+
+    For an EUR-denominated loss in an AED account, use the EUR/AED offer plus the
+    documented broker conversion mark-up and a small additional buffer. If a valid
+    quote cannot be obtained, the caller must fail closed rather than size from a
+    stale FX assumption.
+    """
+    quote = api.get_current_price(EURAED_EPIC)
+    raw_offer = float(quote.get("offer") or 0)
+    if raw_offer <= 0:
+        raise RuntimeError("Capital.com returned no valid EUR/AED offer quote")
+    conservative_rate = raw_offer * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + safety_buffer_pct)
+    return conservative_rate, raw_offer
+
+
 def compute_size(
     sl_distance: float,
+    eur_to_aed: float,
     min_deal_size: float = DEFAULT_MIN_DEAL_SIZE,
     size_increment: float = DEFAULT_SIZE_INCREMENT,
 ) -> Tuple[Optional[float], float, Optional[str]]:
     """Return a broker-valid size whose planned stop-loss is never above AED 40."""
     if sl_distance <= 0:
         return None, 0.0, "invalid non-positive stop distance"
+    if eur_to_aed <= 0:
+        return None, 0.0, "invalid EUR/AED risk-conversion rate"
     if min_deal_size <= 0 or size_increment <= 0:
         return None, 0.0, "invalid broker deal-size constraint"
 
@@ -101,7 +128,7 @@ def compute_size(
     denominator = (
         Decimal(str(sl_distance))
         * Decimal(str(PIP_VALUE_EUR))
-        * Decimal(str(EUR_TO_AED))
+        * Decimal(str(eur_to_aed))
     )
     raw_size = risk_budget / denominator
     step = Decimal(str(size_increment))
@@ -187,6 +214,7 @@ def simulate_day(
     api,
     sim_date: date,
     balance: float,
+    eur_to_aed: float,
     min_deal_size: float = DEFAULT_MIN_DEAL_SIZE,
     size_increment: float = DEFAULT_SIZE_INCREMENT,
 ) -> float:
@@ -263,7 +291,7 @@ def simulate_day(
                     sl_hit = not tp_hit
 
             if tp_hit:
-                pnl     = abs(active_tp - active_entry) * active_size * PIP_VALUE_EUR * EUR_TO_AED
+                pnl     = abs(active_tp - active_entry) * active_size * PIP_VALUE_EUR * eur_to_aed
                 pnl_pct = (pnl / balance) * 100
                 balance += pnl
                 trade_log.append(
@@ -273,7 +301,7 @@ def simulate_day(
                 continue
 
             if sl_hit:
-                pnl     = -abs(active_sl - active_entry) * active_size * PIP_VALUE_EUR * EUR_TO_AED
+                pnl     = -abs(active_sl - active_entry) * active_size * PIP_VALUE_EUR * eur_to_aed
                 pnl_pct = (pnl / balance) * 100
                 balance += pnl
                 trade_log.append(
@@ -304,7 +332,7 @@ def simulate_day(
                 sl      = round(L   - SL_BUFFER, 2)
                 sl_dist = round(entry - sl, 2)
                 size, planned_risk, size_error = compute_size(
-                    sl_dist, min_deal_size, size_increment
+                    sl_dist, eur_to_aed, min_deal_size, size_increment
                 )
                 if size is None:
                     print(f"  [SKIP] T1 BUY — {size_error}")
@@ -329,7 +357,7 @@ def simulate_day(
                 sl      = round(H_ask + SL_BUFFER, 2)
                 sl_dist = round(sl - entry, 2)
                 size, planned_risk, size_error = compute_size(
-                    sl_dist, min_deal_size, size_increment
+                    sl_dist, eur_to_aed, min_deal_size, size_increment
                 )
                 if size is None:
                     print(f"  [SKIP] T1 SELL — {size_error}")
@@ -368,7 +396,7 @@ def simulate_day(
                 label        = "T2 BUY"
 
             t2_size, t2_risk, size_error = compute_size(
-                t2_sldist, min_deal_size, size_increment
+                t2_sldist, eur_to_aed, min_deal_size, size_increment
             )
             if t2_size is None:
                 print(f"  [SKIP] {label} — {size_error}")
@@ -392,9 +420,9 @@ def simulate_day(
         last_price = bars[-1]["closePrice"]["bid"]
         last_ts    = bars[-1].get("snapshotTimeUTC", "EOD")
         if active_dir == "BUY":
-            pnl = (last_price - active_entry) * active_size * PIP_VALUE_EUR * EUR_TO_AED
+            pnl = (last_price - active_entry) * active_size * PIP_VALUE_EUR * eur_to_aed
         else:
-            pnl = (active_entry - last_price) * active_size * PIP_VALUE_EUR * EUR_TO_AED
+            pnl = (active_entry - last_price) * active_size * PIP_VALUE_EUR * eur_to_aed
         pnl_aed  = round(pnl, 2)
         balance += pnl_aed
         trade_log.append(
@@ -420,6 +448,15 @@ def main():
                         help="Full month (YYYY-MM). Runs all weekdays. Repeatable.")
     parser.add_argument("--year",  action="append", default=[],
                         help="Full year (YYYY). Runs all weekdays. Repeatable.")
+    parser.add_argument(
+        "--eur-aed-offer", type=float, default=None,
+        help="Raw EUR/AED offer override for reproducible historical sizing tests. "
+             "Default: fetch live EUR/AED offer from Capital.com."
+    )
+    parser.add_argument(
+        "--fx-safety-buffer-pct", type=float, default=FX_SAFETY_BUFFER_PCT * 100,
+        help="Additional conservative EUR/AED sizing buffer in percent (default: 1.0)."
+    )
     args = parser.parse_args()
 
     if not args.date and not args.month and not args.year:
@@ -455,8 +492,25 @@ def main():
         password=CAPITAL_PASSWORD,
         demo=DEMO_MODE
     )
-    api.create_session()
+    if not api.create_session():
+        raise SystemExit("Could not create Capital.com session for historical replay")
     min_deal_size, size_increment = get_deal_size_constraints(api)
+
+    safety_buffer = args.fx_safety_buffer_pct / 100.0
+    if safety_buffer < 0:
+        parser.error("--fx-safety-buffer-pct must be non-negative")
+    try:
+        if args.eur_aed_offer is not None:
+            if args.eur_aed_offer <= 0:
+                parser.error("--eur-aed-offer must be positive")
+            raw_eur_to_aed = args.eur_aed_offer
+            eur_to_aed = raw_eur_to_aed * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + safety_buffer)
+        else:
+            eur_to_aed, raw_eur_to_aed = get_conservative_eur_to_aed(api, safety_buffer)
+    except Exception as error:
+        raise SystemExit(
+            "Could not obtain a valid EUR/AED quote for risk sizing; replay stopped: {}".format(error)
+        )
 
     if START_CAPITAL is not None:
         start_balance = START_CAPITAL
@@ -469,6 +523,9 @@ def main():
     print("T2 reversal: ENABLED")
     print(f"Starting balance: AED {balance:,.2f}")
     print(f"Risk cap per trade: AED {RISK_PER_TRADE_AED:.2f}")
+    print(f"EUR/AED raw offer: {raw_eur_to_aed:.5f} | risk-sizing rate: {eur_to_aed:.5f} "
+          f"(broker mark-up {BROKER_FX_MARKUP_PCT * 100:.1f}% + "
+          f"buffer {safety_buffer * 100:.1f}%)")
     print(f"Broker deal size: min={min_deal_size} | increment={size_increment}")
     print(f"Simulating {len(dates)} trading day(s)\n")
 
@@ -483,6 +540,7 @@ def main():
             api,
             sim_date,
             balance,
+            eur_to_aed=eur_to_aed,
             min_deal_size=min_deal_size,
             size_increment=size_increment,
         )

@@ -42,7 +42,11 @@ REENTRY_PRICE_BUFFER = 2.0  # pts: re-arm stop when price returns within this of
 CHECK_EVERY   = 30           # seconds between scans (pre-candle)
 CHECK_FAST    = 0.5          # seconds between scans (post-candle, waiting for breakout)
 PIP_VALUE_EUR = 1.0          # DE40: 1 pt = €1 per unit
-EUR_TO_AED    = 3.97         # EUR → AED conversion (update if rate moves significantly)
+# DE40 P&L is EUR-denominated while the account reports AED P&L. Size from the
+# live EUR/AED offer plus Capital.com's conversion mark-up and a safety buffer.
+EURAED_EPIC = "EURAED"
+BROKER_FX_MARKUP_PCT = 0.007
+FX_SAFETY_BUFFER_PCT = 0.01
 # Safe fallback values confirmed from the Capital.com DE40 market metadata.
 # The live runner refreshes them from GET /markets/DE40 at startup.
 DEFAULT_MIN_DEAL_SIZE = 0.001
@@ -207,17 +211,35 @@ def get_deal_size_constraints(api: CapitalComAPI) -> Tuple[float, float]:
     return min_size, size_step
 
 
-def compute_size(sl_distance: float) -> Optional[float]:
+def get_conservative_eur_to_aed(api: CapitalComAPI) -> Tuple[float, float]:
+    """Return conservative EUR/AED risk rate and raw broker offer quote.
+
+    The conversion rate includes Capital.com's documented retail conversion mark-up
+    plus an additional sizing buffer. Callers fail closed when the live quote is
+    unavailable rather than risking a trade from a stale static rate.
+    """
+    quote = api.get_current_price(EURAED_EPIC)
+    raw_offer = float(quote.get("offer") or 0)
+    if raw_offer <= 0:
+        raise RuntimeError("Capital.com returned no valid EUR/AED offer quote")
+    conservative_rate = raw_offer * (1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + FX_SAFETY_BUFFER_PCT)
+    return conservative_rate, raw_offer
+
+
+def compute_size(sl_distance: float, eur_to_aed: float) -> Optional[float]:
     """Return a broker-valid size with planned stop-loss at or below AED 40."""
     if sl_distance <= 0:
         log.warning("  [RISK] Invalid non-positive stop distance — order skipped")
+        return None
+    if eur_to_aed <= 0:
+        log.warning("  [RISK] Invalid EUR/AED risk-conversion rate — order skipped")
         return None
 
     risk_budget = Decimal(str(RISK_PER_TRADE_AED))
     denominator = (
         Decimal(str(sl_distance))
         * Decimal(str(PIP_VALUE_EUR))
-        * Decimal(str(EUR_TO_AED))
+        * Decimal(str(eur_to_aed))
     )
     raw_size = risk_budget / denominator
     step = Decimal(str(BROKER_SIZE_INCREMENT))
@@ -241,10 +263,30 @@ def compute_size(sl_distance: float) -> Optional[float]:
         return None
 
     log.info(
-        "  [RISK] stop=%.2fpts | size=%.6f | planned risk=AED %.2f (cap=AED %.2f)",
-        sl_distance, float(size), float(planned_risk), RISK_PER_TRADE_AED,
+        "  [RISK] stop=%.2fpts | EUR/AED offer=%.5f | risk rate=%.5f | "
+        "size=%.6f | planned risk=AED %.2f (cap=AED %.2f)",
+        sl_distance,
+        eur_to_aed / ((1.0 + BROKER_FX_MARKUP_PCT) * (1.0 + FX_SAFETY_BUFFER_PCT)),
+        eur_to_aed,
+        float(size),
+        float(planned_risk),
+        RISK_PER_TRADE_AED,
     )
     return float(size)
+
+
+def compute_size_from_live_fx(api: CapitalComAPI, sl_distance: float, label: str) -> Optional[float]:
+    """Fetch a fresh conservative EUR/AED rate and return a capped broker-valid size."""
+    try:
+        eur_to_aed, raw_offer = get_conservative_eur_to_aed(api)
+    except Exception as error:
+        log.error("  [RISK] %s skipped — EUR/AED quote unavailable: %s", label, error)
+        return None
+    log.debug(
+        "  [RISK] %s using EUR/AED offer %.5f, conservative rate %.5f",
+        label, raw_offer, eur_to_aed,
+    )
+    return compute_size(sl_distance, eur_to_aed)
 
 
 # ── Active position check ─────────────────────────────────────────────────────
@@ -611,12 +653,12 @@ def run():
                 buy_sl    = round(L - SL_BUFFER, 2)
                 buy_dist  = round(buy_entry - buy_sl, 2)
                 buy_tp    = round(buy_entry + RR_RATIO * buy_dist, 2)
-                buy_size  = compute_size(buy_dist)
+                buy_size  = compute_size_from_live_fx(api, buy_dist, "T1 BUY stop")
 
                 sell_sl   = round(H_ask + SL_BUFFER, 2)        # SELL SL at candle high ask (identified H level)
                 sell_dist = round(sell_sl - sell_entry, 2)
                 sell_tp   = round(sell_entry - RR_RATIO * sell_dist, 2)
-                sell_size = compute_size(sell_dist)
+                sell_size = compute_size_from_live_fx(api, sell_dist, "T1 SELL stop")
 
                 if buy_size is None and sell_size is None:
                     log.warning("  [RISK] Both T1 sides exceed the AED %.2f cap — done for day", RISK_PER_TRADE_AED)
@@ -653,7 +695,7 @@ def run():
                     else:
                         mkt_sl_dist = round(cur_ask - buy_sl, 2)
                         buy_tp      = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
-                        buy_size    = compute_size(mkt_sl_dist)
+                        buy_size    = compute_size_from_live_fx(api, mkt_sl_dist, "T1 BUY market")
                         log.warning(f"  [ORDERS] Ask {cur_ask} at/above BUY entry {buy_entry} "
                                     f"(slip={buy_slip}pts) — MARKET BUY recalculated: "
                                     f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
@@ -676,7 +718,7 @@ def run():
                             else:
                                 mkt_sl_dist = round(cur_ask - buy_sl, 2)
                                 buy_tp      = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
-                                buy_size    = compute_size(mkt_sl_dist)
+                                buy_size    = compute_size_from_live_fx(api, mkt_sl_dist, "T1 BUY market fallback")
                                 log.warning(f"  [ORDERS] BUY stop rejected, ask {cur_ask} near entry "
                                             f"{buy_entry} (slip={buy_slip}pts) — MARKET BUY recalculated: "
                                             f"SL={buy_sl} TP={buy_tp} sz={buy_size}")
@@ -699,7 +741,7 @@ def run():
                     else:
                         mkt_sl_dist = round(sell_sl - cur_bid, 2)
                         sell_tp     = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
-                        sell_size   = compute_size(mkt_sl_dist)
+                        sell_size   = compute_size_from_live_fx(api, mkt_sl_dist, "T1 SELL market")
                         log.warning(f"  [ORDERS] Bid {cur_bid} at/below SELL entry {sell_entry} "
                                     f"(slip={sell_slip}pts) — MARKET SELL recalculated: "
                                     f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
@@ -721,7 +763,7 @@ def run():
                             else:
                                 mkt_sl_dist = round(sell_sl - cur_bid, 2)
                                 sell_tp     = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
-                                sell_size   = compute_size(mkt_sl_dist)
+                                sell_size   = compute_size_from_live_fx(api, mkt_sl_dist, "T1 SELL market fallback")
                                 log.warning(f"  [ORDERS] SELL stop rejected, bid {cur_bid} near entry "
                                             f"{sell_entry} (slip={sell_slip}pts) — MARKET SELL recalculated: "
                                             f"SL={sell_sl} TP={sell_tp} sz={sell_size}")
@@ -735,8 +777,10 @@ def run():
                             log.info(f"  [ORDERS] Cancelled competing T1 SELL stop {sell_oid}")
                         except Exception as e:
                             log.warning(f"  [ORDERS] Cancel SELL stop failed: {e}")
+                    t2_dist = round(sell_sl - sell_entry, 2)
+                    t2_size = compute_size_from_live_fx(api, t2_dist, "T2 SELL pre-arm")
                     t2_oid = place_breakout_stop(api, "SELL", sell_entry, sell_sl,
-                                                 sell_tp, sell_size, "T2 SELL pre-arm")
+                                                 sell_tp, t2_size, "T2 SELL pre-arm")
                     if t2_oid:
                         log.info("  [T2 PRE-ARM] ✅ SELL stop pre-armed (market fallback path)")
                     else:
@@ -757,7 +801,7 @@ def run():
                     state["buy_tp"]         = buy_tp
                     state["sell_tp"]        = sell_tp
                     state["buy_size"]       = buy_size
-                    state["sell_size"]      = sell_size
+                    state["sell_size"]      = t2_size
                     save_state(state)
                     log.info(f"  [FILL] T1 BUY market | dealId={buy_market_deal} | SL={buy_sl} TP={buy_tp}")
                     time.sleep(CHECK_FAST)
@@ -771,8 +815,10 @@ def run():
                             log.info(f"  [ORDERS] Cancelled competing T1 BUY stop {buy_oid}")
                         except Exception as e:
                             log.warning(f"  [ORDERS] Cancel BUY stop failed: {e}")
+                    t2_dist = round(buy_entry - buy_sl, 2)
+                    t2_size = compute_size_from_live_fx(api, t2_dist, "T2 BUY pre-arm")
                     t2_oid = place_breakout_stop(api, "BUY", buy_entry, buy_sl,
-                                                 buy_tp, buy_size, "T2 BUY pre-arm")
+                                                 buy_tp, t2_size, "T2 BUY pre-arm")
                     if t2_oid:
                         log.info("  [T2 PRE-ARM] ✅ BUY stop pre-armed (market fallback path)")
                     else:
@@ -792,7 +838,7 @@ def run():
                     state["sell_sl"]        = sell_sl
                     state["buy_tp"]         = buy_tp
                     state["sell_tp"]        = sell_tp
-                    state["buy_size"]       = buy_size
+                    state["buy_size"]       = t2_size
                     state["sell_size"]      = sell_size
                     save_state(state)
                     log.info(f"  [FILL] T1 SELL market | dealId={sell_market_deal} | SL={sell_sl} TP={sell_tp}")
@@ -859,11 +905,14 @@ def run():
                             if re_ask <= b_entry + REENTRY_PRICE_BUFFER:
                                 log.info(f"  [REENTRY] Ask {re_ask} returned near BUY entry "
                                          f"{b_entry} — re-arming BUY stop")
+                                b_dist = round(b_entry - state["buy_sl"], 2)
+                                b_size = compute_size_from_live_fx(api, b_dist, "T1 BUY reentry stop")
                                 oid = place_breakout_stop(
                                     api, "BUY", b_entry,
-                                    state["buy_sl"], state["buy_tp"], state["buy_size"],
+                                    state["buy_sl"], state["buy_tp"], b_size,
                                     "T1 BUY reentry stop")
                                 if oid:
+                                    state["buy_size"]     = b_size
                                     state["buy_order_id"] = oid
                                     state["buy_skipped"]  = False
                                     active_ids.add(oid)   # reflect immediately
@@ -876,11 +925,14 @@ def run():
                             if re_bid >= s_entry - REENTRY_PRICE_BUFFER:
                                 log.info(f"  [REENTRY] Bid {re_bid} returned near SELL entry "
                                          f"{s_entry} — re-arming SELL stop")
+                                s_dist = round(state["sell_sl"] - s_entry, 2)
+                                s_size = compute_size_from_live_fx(api, s_dist, "T1 SELL reentry stop")
                                 oid = place_breakout_stop(
                                     api, "SELL", s_entry,
-                                    state["sell_sl"], state["sell_tp"], state["sell_size"],
+                                    state["sell_sl"], state["sell_tp"], s_size,
                                     "T1 SELL reentry stop")
                                 if oid:
+                                    state["sell_size"]     = s_size
                                     state["sell_order_id"] = oid
                                     state["sell_skipped"]  = False
                                     active_ids.add(oid)   # reflect immediately
@@ -940,7 +992,8 @@ def run():
                     t2_entry = state["sell_entry"]
                     t2_sl    = state["sell_sl"]
                     t2_tp    = state["sell_tp"]
-                    t2_size  = state["sell_size"]
+                    t2_dist  = round(t2_sl - t2_entry, 2)
+                    t2_size  = compute_size_from_live_fx(api, t2_dist, "T2 SELL pre-arm")
                     log.info(f"  [T2 PRE-ARM] SELL stop @ {t2_entry} | "
                              f"SL={t2_sl} TP={t2_tp} sz={t2_size}")
                     t2_oid = place_breakout_stop(api, "SELL", t2_entry, t2_sl,
@@ -951,13 +1004,15 @@ def run():
                     else:
                         log.warning("  [T2 PRE-ARM] Failed — will retry in Step 6 after T1 SL hits")
                     state["sell_order_id"] = t2_oid
+                    state["sell_size"]     = t2_size
                     state["buy_order_id"]  = None
 
                 elif filled_dir == "SELL":
                     t2_entry = state["buy_entry"]
                     t2_sl    = state["buy_sl"]
                     t2_tp    = state["buy_tp"]
-                    t2_size  = state["buy_size"]
+                    t2_dist  = round(t2_entry - t2_sl, 2)
+                    t2_size  = compute_size_from_live_fx(api, t2_dist, "T2 BUY pre-arm")
                     log.info(f"  [T2 PRE-ARM] BUY stop @ {t2_entry} | "
                              f"SL={t2_sl} TP={t2_tp} sz={t2_size}")
                     t2_oid = place_breakout_stop(api, "BUY", t2_entry, t2_sl,
@@ -968,6 +1023,7 @@ def run():
                     else:
                         log.warning("  [T2 PRE-ARM] Failed — will retry in Step 6 after T1 SL hits")
                     state["buy_order_id"]  = t2_oid
+                    state["buy_size"]      = t2_size
                     state["sell_order_id"] = None
 
                 state["trades_today"]   = 1
@@ -994,7 +1050,7 @@ def run():
                     sell_sl    = round(H_ask + SL_BUFFER, 2)
                     sell_dist  = round(sell_sl - sell_entry, 2)
                     sell_tp    = round(sell_entry - RR_RATIO * sell_dist, 2)
-                    sell_size  = compute_size(sell_dist)
+                    sell_size  = compute_size_from_live_fx(api, sell_dist, "T2 SELL stop")
                     if sell_size is None:
                         log.warning("  [RISK] T2 SELL exceeds the AED %.2f cap — done for day", RISK_PER_TRADE_AED)
                         state["t1_sl_hit"] = False
@@ -1025,7 +1081,7 @@ def run():
                             cur_bid = sell_entry
                         mkt_sl_dist = round(sell_sl - cur_bid, 2)
                         mkt_sell_tp   = round(cur_bid - RR_RATIO * mkt_sl_dist, 2)
-                        mkt_sell_size = compute_size(mkt_sl_dist)
+                        mkt_sell_size = compute_size_from_live_fx(api, mkt_sl_dist, "T2 SELL market fallback")
                         log.info(f"  [T2 MARKET] SELL fallback recalculated from bid={cur_bid} | "
                                  f"SL={sell_sl} TP={mkt_sell_tp} sz={mkt_sell_size}")
                         deal_id = place_market_order(api, "SELL", sell_sl, mkt_sell_tp, mkt_sell_size,
@@ -1051,7 +1107,7 @@ def run():
                     buy_sl    = round(L - SL_BUFFER, 2)
                     buy_dist  = round(buy_entry - buy_sl, 2)
                     buy_tp    = round(buy_entry + RR_RATIO * buy_dist, 2)
-                    buy_size  = compute_size(buy_dist)
+                    buy_size  = compute_size_from_live_fx(api, buy_dist, "T2 BUY stop")
                     if buy_size is None:
                         log.warning("  [RISK] T2 BUY exceeds the AED %.2f cap — done for day", RISK_PER_TRADE_AED)
                         state["t1_sl_hit"] = False
@@ -1082,7 +1138,7 @@ def run():
                             cur_ask = buy_entry
                         mkt_sl_dist = round(cur_ask - buy_sl, 2)
                         mkt_buy_tp   = round(cur_ask + RR_RATIO * mkt_sl_dist, 2)
-                        mkt_buy_size = compute_size(mkt_sl_dist)
+                        mkt_buy_size = compute_size_from_live_fx(api, mkt_sl_dist, "T2 BUY market fallback")
                         log.info(f"  [T2 MARKET] BUY fallback recalculated from ask={cur_ask} | "
                                  f"SL={buy_sl} TP={mkt_buy_tp} sz={mkt_buy_size}")
                         deal_id = place_market_order(api, "BUY", buy_sl, mkt_buy_tp, mkt_buy_size,
