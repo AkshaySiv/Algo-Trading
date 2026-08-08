@@ -3,7 +3,3 @@
 .DS_Store
 __pycache__/
 *.pyc
-
-# Historical data and generated backtest outputs
-GOLD/data/
-GOLD/backtest_output/
