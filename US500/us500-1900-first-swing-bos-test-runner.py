@@ -131,8 +131,10 @@ def session_bounds_utc(session_date: date, pivot_left: int) -> tuple[datetime, d
 
     Data begins a few minutes before 19:00 IST so a pivot on an early session
     bar can still use its required left-side candles. The replay remains active
-    until the following 19:00 IST reset, matching the Pine strategy's optional
-    daily flatten behavior.
+    until the next tradable weekday's 19:00 IST reset. A Friday position is
+    therefore evaluated through the Sunday/Monday market reopening and then
+    flattened at Monday 19:00 IST, rather than trying to query a closed
+    Saturday market.
     """
     session_start_ist = datetime(
         session_date.year, session_date.month, session_date.day,
@@ -140,13 +142,21 @@ def session_bounds_utc(session_date: date, pivot_left: int) -> tuple[datetime, d
     )
     data_start_ist = session_start_ist - timedelta(minutes=pivot_left + 1)
     entry_cutoff_ist = session_start_ist + timedelta(minutes=ENTRY_WINDOW_MINUTES)
-    next_reset_ist = session_start_ist + timedelta(days=1)
+    next_reset_ist = next_tradable_session_start_ist(session_start_ist)
     return (
         data_start_ist.astimezone(UTC),
         session_start_ist.astimezone(UTC),
         entry_cutoff_ist.astimezone(UTC),
         next_reset_ist.astimezone(UTC),
     )
+
+
+def next_tradable_session_start_ist(session_start_ist: datetime) -> datetime:
+    """Return the next weekday at 19:00 IST, skipping Saturday and Sunday."""
+    candidate = session_start_ist + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
 
 
 def parse_capital_timestamp(value: str) -> datetime:
@@ -214,7 +224,14 @@ def fetch_minute_bars(
     start_utc: datetime,
     end_utc: datetime,
 ) -> list[Candle]:
-    """Fetch a potentially multi-request range of historical one-minute US500 bars."""
+    """Fetch a one-minute US500 range without failing on closed-weekend periods.
+
+    Capital.com's /prices endpoint returns HTTP 404, rather than an empty
+    ``prices`` array, when a request lies wholly within a market-closed period.
+    Fetching in UTC-day chunks lets a Friday replay skip Saturday safely while
+    preserving Friday, Sunday reopen, and Monday data. Unexpected 404s on a
+    weekday still fail loudly instead of silently removing trading data.
+    """
     if start_utc > end_utc:
         raise ValueError("Price range start must not be after end")
 
@@ -222,8 +239,27 @@ def fetch_minute_bars(
     cursor = start_utc
 
     while cursor <= end_utc:
+        # Capital.com returns 404 for any Saturday-only historical US500 query.
+        # Skip to Sunday 00:00 UTC; Sunday is retained because index futures may
+        # reopen late on Sunday and can hit an existing Friday stop or target.
+        if cursor.weekday() == 5:
+            cursor = datetime(
+                cursor.year,
+                cursor.month,
+                cursor.day,
+                tzinfo=UTC,
+            ) + timedelta(days=1)
+            continue
+
+        next_utc_midnight = datetime(
+            cursor.year,
+            cursor.month,
+            cursor.day,
+            tzinfo=UTC,
+        ) + timedelta(days=1)
         chunk_end = min(
             cursor + timedelta(minutes=REQUEST_CHUNK_MINUTES) - timedelta(seconds=1),
+            next_utc_midnight - timedelta(seconds=1),
             end_utc,
         )
         api._ensure_session()
@@ -237,6 +273,12 @@ def fetch_minute_bars(
             },
             timeout=20,
         )
+
+        if response.status_code == 404 and cursor.weekday() == 6:
+            # A Sunday request before the futures market reopens can also be a
+            # valid no-data segment. Continue to the following day chunk.
+            cursor = chunk_end + timedelta(seconds=1)
+            continue
         response.raise_for_status()
 
         for raw_bar in response.json().get("prices", []):
@@ -647,11 +689,15 @@ def synthetic_candle(timestamp: datetime, high: float, low: float, close: float,
 
 
 def run_self_test() -> None:
-    """Test sizing, SL priority, pivot detection, and one-trade enforcement offline."""
+    """Test sizing, SL priority, pivot detection, one-trade, and Friday handling."""
     size, planned_risk, error = compute_size(10.0, 40.0, 1.0, 0.1, 0.1)
     assert error is None and size is not None and planned_risk <= 40.0
     assert select_long_stop(110.0, 104.0, 98.0, 105.0) == (104.0, "nearest confirmed swing low")
     assert select_short_stop(90.0, 96.0, 102.0, 94.0) == (96.0, "nearest confirmed swing high")
+
+    # Friday positions must flatten at Monday 19:00 IST, never on Saturday.
+    _, _, _, friday_reset = session_bounds_utc(date(2026, 8, 14), pivot_left=5)
+    assert friday_reset.astimezone(IST) == datetime(2026, 8, 17, 19, 0, tzinfo=IST)
 
     test_date = date(2026, 4, 10)
     start_ist = datetime(2026, 4, 10, 18, 58, tzinfo=IST)
@@ -684,7 +730,10 @@ def run_self_test() -> None:
     assert result.trade.stop == 97
     assert result.trade.stop_source == "nearest confirmed swing low"
     assert result.trade.exit_reason == "TP"
-    print("Self-test passed: pivot range, nearest-structure SL, 1:2 TP, and one-trade guard verified.")
+    print(
+        "Self-test passed: pivot range, nearest-structure SL, 1:2 TP, "
+        "one-trade guard, and Friday-to-Monday reset verified."
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
