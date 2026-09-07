@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-US500 19:00 IST First-Swing BOS — Capital.com Dry-Run Backtester
-=================================================================
+US500 New York Open First-Swing BOS — Capital.com Dry-Run Backtester
+===================================================================
 
 Faithful Python replay of the TradingView strategy discussed in this project.
 It reads Capital.com historical 1-minute US500 bars and NEVER opens, closes,
@@ -9,9 +9,11 @@ or modifies a Capital.com position.
 
 Strategy rules
 --------------
-1. Session begins at 19:00 Asia/Kolkata (IST) and permits entries only through
-   21:59:59 IST. No new order may be opened from 22:00 IST onward.
-2. Capture the first confirmed pivot high and pivot low after 19:00 IST.
+1. Session begins at the 09:30 New York cash-equity open. This is 19:00 IST
+   during U.S. daylight time and 20:00 IST during U.S. standard time. Entries
+   are permitted only during the following three hours.
+2. Capture the first confirmed pivot high and pivot low after the 09:30 New
+   York opening.
    Those two levels define the BOS range.
 3. The first close (or wick, if selected) through the range high is a BUY BOS;
    the first close/wick through the range low is a SELL BOS.
@@ -64,9 +66,11 @@ from capitalcom_api import CapitalComAPI
 # ── Strategy and Capital.com configuration ───────────────────────────────────
 EPIC = "US500"
 IST = ZoneInfo("Asia/Kolkata")
+NEW_YORK = ZoneInfo("America/New_York")
 UTC = timezone.utc
-SESSION_HOUR = 19
-ENTRY_WINDOW_MINUTES = 180  # 19:00 IST <= entry timestamp < 22:00 IST
+NEW_YORK_OPEN_HOUR = 9
+NEW_YORK_OPEN_MINUTE = 30
+ENTRY_WINDOW_MINUTES = 180  # Three hours from the 09:30 New York cash open.
 REWARD_MULTIPLE = 2.0      # 1:2 reward:risk
 DEFAULT_RISK_AED = 40.0
 DEFAULT_STARTING_CAPITAL_AED = 4_000.0
@@ -116,7 +120,7 @@ class Trade:
 
 @dataclass
 class SimulationResult:
-    """Replay result for one IST calendar session."""
+    """Replay result for one New York trading-session date."""
 
     session_date: date
     first_swing_high: Optional[float]
@@ -126,37 +130,59 @@ class SimulationResult:
 
 
 # ── Date and timestamp helpers ───────────────────────────────────────────────
-def session_bounds_utc(session_date: date, pivot_left: int) -> tuple[datetime, datetime, datetime, datetime]:
-    """Return data start, session start, entry cutoff, and next reset in UTC.
-
-    Data begins a few minutes before 19:00 IST so a pivot on an early session
-    bar can still use its required left-side candles. The replay remains active
-    until the next tradable weekday's 19:00 IST reset. A Friday position is
-    therefore evaluated through the Sunday/Monday market reopening and then
-    flattened at Monday 19:00 IST, rather than trying to query a closed
-    Saturday market.
-    """
-    session_start_ist = datetime(
-        session_date.year, session_date.month, session_date.day,
-        SESSION_HOUR, 0, tzinfo=IST,
-    )
-    data_start_ist = session_start_ist - timedelta(minutes=pivot_left + 1)
-    entry_cutoff_ist = session_start_ist + timedelta(minutes=ENTRY_WINDOW_MINUTES)
-    next_reset_ist = next_tradable_session_start_ist(session_start_ist)
-    return (
-        data_start_ist.astimezone(UTC),
-        session_start_ist.astimezone(UTC),
-        entry_cutoff_ist.astimezone(UTC),
-        next_reset_ist.astimezone(UTC),
+def new_york_open(session_date: date) -> datetime:
+    """Return the 09:30 New York cash-equity opening timestamp for a session."""
+    return datetime(
+        session_date.year,
+        session_date.month,
+        session_date.day,
+        NEW_YORK_OPEN_HOUR,
+        NEW_YORK_OPEN_MINUTE,
+        tzinfo=NEW_YORK,
     )
 
 
-def next_tradable_session_start_ist(session_start_ist: datetime) -> datetime:
-    """Return the next weekday at 19:00 IST, skipping Saturday and Sunday."""
-    candidate = session_start_ist + timedelta(days=1)
+def next_weekday(session_date: date) -> date:
+    """Return the next Monday-Friday calendar date without assuming it is a trading day."""
+    candidate = session_date + timedelta(days=1)
     while candidate.weekday() >= 5:
         candidate += timedelta(days=1)
     return candidate
+
+
+def session_bounds_utc(session_date: date, pivot_left: int) -> tuple[datetime, datetime, datetime, datetime]:
+    """Return data start, 09:30 NY start, entry cutoff, and expected reset in UTC.
+
+    The strategy is tied to the U.S. cash open rather than a fixed IST hour.
+    This avoids taking the setup one hour before the U.S. cash session during
+    the U.S. standard-time period. The expected reset is the next weekday's
+    09:30 New York opening; market-holiday handling finds the first actual
+    available opening bar if that expected day is closed.
+    """
+    session_start_ny = new_york_open(session_date)
+    expected_reset_ny = new_york_open(next_weekday(session_date))
+    return (
+        (session_start_ny - timedelta(minutes=pivot_left + 1)).astimezone(UTC),
+        session_start_ny.astimezone(UTC),
+        (session_start_ny + timedelta(minutes=ENTRY_WINDOW_MINUTES)).astimezone(UTC),
+        expected_reset_ny.astimezone(UTC),
+    )
+
+
+def is_next_session_reset_bar(timestamp: datetime, session_start: datetime) -> bool:
+    """Return whether a bar starts the next actual 09:30 New York session.
+
+    On a U.S. holiday the expected weekday has no 09:30 bar. The next available
+    weekday 09:30 bar becomes the reset, matching a real trading-session reset
+    rather than flattening at an unrelated subsequent price bar.
+    """
+    local = timestamp.astimezone(NEW_YORK)
+    return (
+        timestamp > session_start
+        and local.weekday() < 5
+        and local.hour == NEW_YORK_OPEN_HOUR
+        and local.minute == NEW_YORK_OPEN_MINUTE
+    )
 
 
 def parse_capital_timestamp(value: str) -> datetime:
@@ -229,8 +255,9 @@ def fetch_minute_bars(
     Capital.com's /prices endpoint returns HTTP 404, rather than an empty
     ``prices`` array, when a request lies wholly within a market-closed period.
     Fetching in UTC-day chunks lets a Friday replay skip Saturday safely while
-    preserving Friday, Sunday reopen, and Monday data. Unexpected 404s on a
-    weekday still fail loudly instead of silently removing trading data.
+    preserving Friday, Sunday reopen, Monday data, and U.S. market holidays.
+    A missing chunk is recorded as unavailable data; it must not invalidate
+    usable earlier bars from the session being replayed.
     """
     if start_utc > end_utc:
         raise ValueError("Price range start must not be after end")
@@ -274,9 +301,10 @@ def fetch_minute_bars(
             timeout=20,
         )
 
-        if response.status_code == 404 and cursor.weekday() == 6:
-            # A Sunday request before the futures market reopens can also be a
-            # valid no-data segment. Continue to the following day chunk.
+        if response.status_code == 404:
+            # Closed Saturday and Sunday periods, and U.S. market holidays,
+            # legitimately return 404. Advance by a whole queried chunk so a
+            # valid session before the closure remains available for replay.
             cursor = chunk_end + timedelta(seconds=1)
             continue
         response.raise_for_status()
@@ -440,11 +468,11 @@ def simulate_session(
     min_deal_size: float,
     size_increment: float,
 ) -> SimulationResult:
-    """Replay one IST session using only completed one-minute candles."""
+    """Replay one New York-opening session using only completed one-minute candles."""
     if not bars:
         return SimulationResult(session_date, None, None, None, "No US500 1-minute bars returned")
 
-    _, session_start, entry_cutoff, next_reset = session_bounds_utc(session_date, pivot_left)
+    _, session_start, entry_cutoff, _ = session_bounds_utc(session_date, pivot_left)
 
     first_swing_high: Optional[float] = None
     first_swing_low: Optional[float] = None
@@ -465,8 +493,12 @@ def simulate_session(
                 trade.exit_reason = reason
                 trade.pnl_aed = trade_pnl
 
-        # Flatten at the next daily 19:00 IST reset if position is still alive.
-        if trade is not None and trade.exit_time is None and bar.timestamp >= next_reset:
+        # Flatten at the next actual 09:30 New York session reset if position is
+        # still alive. ``next_reset`` is only the expected weekday boundary;
+        # a U.S. market holiday may mean the first eligible bar is later.
+        if trade is not None and trade.exit_time is None and is_next_session_reset_bar(
+            bar.timestamp, session_start
+        ):
             exit_price = bar.close_bid if trade.direction == "BUY" else bar.close_ask
             trade.exit_time = bar.timestamp
             trade.exit_price = exit_price
@@ -494,7 +526,7 @@ def simulate_session(
                     if first_swing_low is None:
                         first_swing_low = pivot_bar.low_bid
 
-        # No new signal after 22:00 IST or after the one allowed daily trade.
+        # No new signal after the three-hour entry window or after one daily trade.
         if not (session_start <= bar.timestamp < entry_cutoff):
             continue
         if trade_taken or first_swing_high is None or first_swing_low is None or index == 0:
@@ -557,9 +589,9 @@ def simulate_session(
 
     if trade is None:
         if first_swing_high is None or first_swing_low is None:
-            note = "No complete confirmed first-swing range before 22:00 IST"
+            note = "No complete confirmed first-swing range before the three-hour entry cutoff"
         else:
-            note = "No valid BOS before 22:00 IST"
+            note = "No valid BOS before the three-hour entry cutoff"
     elif trade.exit_time is None:
         note = "Trade remains open after replay data ended"
     else:
@@ -646,11 +678,11 @@ def collect_dates(args: argparse.Namespace) -> list[date]:
 def build_parser() -> argparse.ArgumentParser:
     """Build command-line interface."""
     parser = argparse.ArgumentParser(
-        description="Replay US500 19:00 IST first-swing BOS strategy on Capital.com 1-minute data."
+        description="Replay the US500 09:30 New York first-swing BOS strategy on Capital.com 1-minute data."
     )
-    parser.add_argument("--date", action="append", default=[], help="IST session date YYYY-MM-DD. Repeatable.")
-    parser.add_argument("--month", action="append", default=[], help="Whole IST month YYYY-MM. Repeatable.")
-    parser.add_argument("--year", action="append", default=[], help="Whole IST year YYYY. Repeatable.")
+    parser.add_argument("--date", action="append", default=[], help="New York session date YYYY-MM-DD. Repeatable.")
+    parser.add_argument("--month", action="append", default=[], help="Whole New York session month YYYY-MM. Repeatable.")
+    parser.add_argument("--year", action="append", default=[], help="Whole New York session year YYYY. Repeatable.")
     parser.add_argument("--pivot-left", type=int, default=5, choices=range(1, 21), metavar="1-20")
     parser.add_argument("--pivot-right", type=int, default=5, choices=range(1, 21), metavar="1-20")
     parser.add_argument("--bos-mode", choices=("Close", "Wick"), default="Close")
@@ -695,9 +727,15 @@ def run_self_test() -> None:
     assert select_long_stop(110.0, 104.0, 98.0, 105.0) == (104.0, "nearest confirmed swing low")
     assert select_short_stop(90.0, 96.0, 102.0, 94.0) == (96.0, "nearest confirmed swing high")
 
-    # Friday positions must flatten at Monday 19:00 IST, never on Saturday.
-    _, _, _, friday_reset = session_bounds_utc(date(2026, 8, 14), pivot_left=5)
-    assert friday_reset.astimezone(IST) == datetime(2026, 8, 17, 19, 0, tzinfo=IST)
+    # Friday positions must reset at Monday 09:30 New York, never Saturday.
+    _, _, _, summer_friday_reset = session_bounds_utc(date(2026, 8, 14), pivot_left=5)
+    assert summer_friday_reset.astimezone(IST) == datetime(2026, 8, 17, 19, 0, tzinfo=IST)
+
+    # The same cash open shifts by one IST hour when New York leaves daylight time.
+    _, winter_start, winter_cutoff, winter_friday_reset = session_bounds_utc(date(2026, 1, 9), pivot_left=5)
+    assert winter_start.astimezone(IST) == datetime(2026, 1, 9, 20, 0, tzinfo=IST)
+    assert winter_cutoff.astimezone(IST) == datetime(2026, 1, 9, 23, 0, tzinfo=IST)
+    assert winter_friday_reset.astimezone(IST) == datetime(2026, 1, 12, 20, 0, tzinfo=IST)
 
     test_date = date(2026, 4, 10)
     start_ist = datetime(2026, 4, 10, 18, 58, tzinfo=IST)
@@ -732,7 +770,7 @@ def run_self_test() -> None:
     assert result.trade.exit_reason == "TP"
     print(
         "Self-test passed: pivot range, nearest-structure SL, 1:2 TP, "
-        "one-trade guard, and Friday-to-Monday reset verified."
+        "one-trade guard, Friday reset, and New York DST timing verified."
     )
 
 
@@ -779,10 +817,11 @@ def main() -> None:
     min_deal_size, size_increment = get_deal_size_constraints(api)
     balance = args.starting_capital_aed
 
-    print("\nUS500 19:00 IST First-Swing BOS — Capital.com Dry-Run Backtester")
+    print("\nUS500 09:30 New York First-Swing BOS — Capital.com Dry-Run Backtester")
     print("Orders: DISABLED (historical data only)")
     print(f"Mode: {'DEMO' if demo_mode else 'LIVE DATA / NO ORDERS'}")
-    print(f"Entry window: 19:00–22:00 IST | One trade per session | BOS: {args.bos_mode}")
+    print("Entry window: 09:30–12:30 New York | 19:00–22:00 IST in EDT; 20:00–23:00 IST in EST")
+    print(f"One trade per session | BOS: {args.bos_mode}")
     print(f"Pivot strength: {args.pivot_left}/{args.pivot_right} | TP: 1:2 | Risk cap: AED {args.risk_aed:.2f}")
     print(f"US500 size rules: min={min_deal_size:g}, increment={size_increment:g}")
     print(f"USD/AED conversion assumption: {USD_TO_AED:.4f}\n")
