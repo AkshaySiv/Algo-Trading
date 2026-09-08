@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """US500 09:30 New York First-Swing BOS — guarded Capital.com live runner.
 
-This runner is deliberately fail-closed and **dry-run by default**. It uses the
-same 1-minute, 09:30 America/New_York first-swing BOS mechanics as
+This runner starts directly with ``python3 us500_ny_open_bos_live.py``. It uses
+the same 1-minute, 09:30 America/New_York first-swing BOS mechanics as
 ``us500_ny_open_bos_backtest.py`` with the validated entry filter:
 
     abs(close_bid - open_bid) / (high_bid - low_bid) >= 0.75
 
-Live order submission requires all of the following:
-    1. ``--execute``
-    2. ``--risk-aed <positive amount>``
-    3. ``--yes-i-accept-live-orders``
-    4. ``--allow-live-account`` when ``CAPITAL_DEMO=false``
+The fixed planned risk is ``RISK_PER_TRADE_AED`` (AED 40.00). Account mode is
+selected only through ``CAPITAL_DEMO`` in ``.env``:
+
+    CAPITAL_DEMO=true   # Capital.com demo account
+    CAPITAL_DEMO=false  # Capital.com live account
 
 The close-confirmed strategy intentionally uses a protected MARKET entry, not a
 pre-armed STOP entry: the body-quality condition is knowable only after the
@@ -29,7 +29,6 @@ used as an always-on execution environment.
 
 from __future__ import annotations
 
-import argparse
 import fcntl
 import importlib.util
 import json
@@ -68,6 +67,8 @@ VALUE_PER_POINT_USD = 1.0
 USD_TO_AED = 3.6725
 DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_MAX_ENTRY_SLIPPAGE_POINTS = 2.0
+RISK_PER_TRADE_AED = 40.0
+ORDER_EXECUTION_ENABLED = True
 POSITION_RECONCILIATION_RETRIES = 3
 RECONCILIATION_SLEEP_SECONDS = 0.75
 
@@ -707,33 +708,16 @@ def reset_if_due(api: CapitalComAPI, state: Optional[dict[str, Any]], now_utc: d
     return new_state(today, config)
 
 
-def validate_runtime_arguments(args: argparse.Namespace) -> None:
-    """Enforce explicit arming and safe numerical bounds before API access."""
-    if args.risk_aed is None or args.risk_aed <= 0:
-        raise SystemExit("Provide a positive --risk-aed; no default live risk is allowed.")
-    if args.poll_seconds <= 0:
-        raise SystemExit("--poll-seconds must be positive")
-    if args.max_entry_slippage_points < 0:
-        raise SystemExit("--max-entry-slippage-points cannot be negative")
-    if args.body_threshold != BODY_THRESHOLD:
-        raise SystemExit(f"This validated runner requires --body-threshold {BODY_THRESHOLD:.2f}")
-    if args.execute and not args.yes_i_accept_live_orders:
-        raise SystemExit("--execute also requires --yes-i-accept-live-orders")
-    demo = os.getenv("CAPITAL_DEMO", "true").lower() == "true"
-    if args.execute and not demo and not args.allow_live_account:
-        raise SystemExit("CAPITAL_DEMO=false requires --allow-live-account in addition to --execute")
-
-
-def runner_config(args: argparse.Namespace) -> dict[str, Any]:
-    """Create the state fingerprint that prevents changing core parameters mid-session."""
+def runner_config() -> dict[str, Any]:
+    """Return the fixed configuration used by the parameter-free runner."""
     return {
-        "risk_aed": args.risk_aed,
-        "body_threshold": args.body_threshold,
-        "max_entry_slippage_points": args.max_entry_slippage_points,
+        "risk_aed": RISK_PER_TRADE_AED,
+        "body_threshold": BODY_THRESHOLD,
+        "max_entry_slippage_points": DEFAULT_MAX_ENTRY_SLIPPAGE_POINTS,
         "pivot_left": PIVOT_LEFT,
         "pivot_right": PIVOT_RIGHT,
         "reward_multiple": REWARD_MULTIPLE,
-        "mode": "EXECUTE" if args.execute else "DRY_RUN",
+        "mode": "EXECUTE" if ORDER_EXECUTION_ENABLED else "DRY_RUN",
     }
 
 
@@ -768,8 +752,8 @@ def refresh_waiting_state_config(state: dict[str, Any], config: dict[str, Any], 
     state["config"] = config
 
 
-def run_cycle(api: CapitalComAPI, state: dict[str, Any], args: argparse.Namespace,
-              constraints: BrokerConstraints, log: logging.Logger) -> tuple[dict[str, Any], bool]:
+def run_cycle(api: CapitalComAPI, state: dict[str, Any], constraints: BrokerConstraints,
+              log: logging.Logger) -> tuple[dict[str, Any], bool]:
     """Execute one deterministic lifecycle cycle; return state and stop flag."""
     now_utc = datetime.now(UTC)
     session_date = date.fromisoformat(state["session_date"])
@@ -832,7 +816,7 @@ def run_cycle(api: CapitalComAPI, state: dict[str, Any], args: argparse.Namespac
         return state, False
 
     plan, reason = build_trade_plan(
-        signal, bid, offer, args.risk_aed, args.max_entry_slippage_points, constraints
+        signal, bid, offer, RISK_PER_TRADE_AED, DEFAULT_MAX_ENTRY_SLIPPAGE_POINTS, constraints
     )
     state["signal"] = asdict(signal)
     if plan is None:
@@ -847,7 +831,7 @@ def run_cycle(api: CapitalComAPI, state: dict[str, Any], args: argparse.Namespac
         plan.target, plan.size, plan.planned_risk_aed, plan.adverse_slippage_points,
     )
     try:
-        receipt = submit_protected_market_order(api, plan, constraints, args.execute, log)
+        receipt = submit_protected_market_order(api, plan, constraints, ORDER_EXECUTION_ENABLED, log)
     except Exception as error:
         state["status"] = "LOCKED"
         state["lock_reason"] = f"Order lifecycle failed: {type(error).__name__}: {error}"
@@ -856,30 +840,13 @@ def run_cycle(api: CapitalComAPI, state: dict[str, Any], args: argparse.Namespac
 
     state["trade_taken"] = True
     state["trade"] = {**asdict(plan), **receipt, "submitted_at_utc": iso_utc(datetime.now(UTC))}
-    if args.execute:
+    if ORDER_EXECUTION_ENABLED:
         state["status"] = "IN_POSITION"
         log.warning("[LIVE] Protected Capital.com position active; no second trade will be submitted today")
     else:
         state["status"] = "DONE"
         log.warning("[DRY-RUN] Signal recorded; no order was sent")
     return state, False
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Expose explicit, safety-first live runner controls."""
-    parser = argparse.ArgumentParser(description="Fail-closed US500 09:30 New York first-swing BOS runner.")
-    parser.add_argument("--risk-aed", type=float, help="Required planned maximum loss per trade in AED.")
-    parser.add_argument("--body-threshold", type=float, default=BODY_THRESHOLD, help="Must remain 0.75 for this validated variant.")
-    parser.add_argument("--max-entry-slippage-points", type=float, default=DEFAULT_MAX_ENTRY_SLIPPAGE_POINTS)
-    parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
-    parser.add_argument("--state-path", type=Path, default=DEFAULT_STATE_PATH)
-    parser.add_argument("--once", action="store_true", help="Run one guarded scan cycle then exit.")
-    parser.add_argument("--execute", action="store_true", help="Permit Capital.com position and reset-close requests.")
-    parser.add_argument("--yes-i-accept-live-orders", action="store_true", dest="yes_i_accept_live_orders")
-    parser.add_argument("--allow-live-account", action="store_true", help="Required only when CAPITAL_DEMO=false.")
-    parser.add_argument("--self-test", action="store_true", help="Run offline safety tests; no API calls or credentials.")
-    parser.add_argument("--verbose", action="store_true")
-    return parser
 
 
 class RejectingAPI:
@@ -960,16 +927,28 @@ def run_self_test() -> None:
     print("Self-test passed: DST windows, causal body filter, protected sizing, price rounding, and dry-run order gate.")
 
 
+def account_balance_summary(account: dict[str, Any]) -> tuple[str, float, Optional[float]]:
+    """Extract active-account currency, balance, and optional available funds safely."""
+    balance_data = account.get("balance", {})
+    if not isinstance(balance_data, dict):
+        balance_data = {}
+    currency = str(account.get("currency") or account.get("currencyIsoCode") or "UNKNOWN")
+    balance = float(balance_data.get("balance") or 0.0)
+    available_raw = balance_data.get("available")
+    available = float(available_raw) if available_raw is not None else None
+    return currency, balance, available
+
+
 def main() -> None:
-    """Run guarded scans once or continuously after explicit operator arming."""
-    parser = build_parser()
-    args = parser.parse_args()
-    if args.self_test:
+    """Run the live runner using settings defined directly in this file and .env."""
+    if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
         run_self_test()
         return
-    validate_runtime_arguments(args)
-    log = configure_logging(args.verbose)
-    config = runner_config(args)
+    if len(sys.argv) > 1:
+        raise SystemExit("No command-line parameters are used. Run: python3 us500_ny_open_bos_live.py")
+
+    log = configure_logging(False)
+    config = runner_config()
     demo_mode = os.getenv("CAPITAL_DEMO", "true").lower() == "true"
     credentials = {
         "api_key": os.getenv("CAPITAL_API_KEY", ""),
@@ -979,28 +958,34 @@ def main() -> None:
     if not all(credentials.values()):
         raise SystemExit("Missing CAPITAL_API_KEY, CAPITAL_IDENTIFIER, or CAPITAL_PASSWORD in US500/.env or environment.")
 
-    lock_path = args.state_path.with_suffix(args.state_path.suffix + ".lock")
+    lock_path = DEFAULT_LOCK_PATH
     with exclusive_lock(lock_path):
         api = CapitalComAPI(demo=demo_mode, **credentials)
         if not api.create_session():
             raise SystemExit("Capital.com session creation failed; runner stopped before any order path.")
         try:
             constraints = read_broker_constraints(api)
+            account = api.get_account_info()
+            currency, balance, available = account_balance_summary(account)
             log.warning("=" * 76)
-            log.warning("US500 NY-open BOS body>=75%% runner | %s | execution=%s", "DEMO" if demo_mode else "LIVE", args.execute)
-            log.warning("Session: 09:30-12:30 America/New_York | one trade | 1:2 target | risk cap=AED %.2f", args.risk_aed)
+            log.warning("US500 NY-open BOS body>=75%% runner | %s account | execution=%s", "DEMO" if demo_mode else "LIVE", ORDER_EXECUTION_ENABLED)
+            log.warning("Session: 09:30-12:30 America/New_York | one trade | 1:2 target | risk cap=AED %.2f", RISK_PER_TRADE_AED)
+            if available is None:
+                log.warning("Account balance: %s %.2f", currency, balance)
+            else:
+                log.warning("Account balance: %s %.2f | available: %.2f", currency, balance, available)
             log.warning("Broker: min size=%s step=%s price tick=%s min stop=%s", constraints.min_deal_size, constraints.size_increment, constraints.price_increment, constraints.min_stop_distance)
             log.warning("=" * 76)
 
             while True:
                 now_utc = datetime.now(UTC)
-                state = reset_if_due(api, load_state(args.state_path), now_utc, args.execute, config, log)
+                state = reset_if_due(api, load_state(DEFAULT_STATE_PATH), now_utc, ORDER_EXECUTION_ENABLED, config, log)
                 refresh_waiting_state_config(state, config, log)
-                state, stop = run_cycle(api, state, args, constraints, log)
-                save_state(args.state_path, state)
-                if args.once or stop:
+                state, stop = run_cycle(api, state, constraints, log)
+                save_state(DEFAULT_STATE_PATH, state)
+                if stop:
                     break
-                time.sleep(args.poll_seconds)
+                time.sleep(DEFAULT_POLL_SECONDS)
         finally:
             try:
                 api.delete_session()
