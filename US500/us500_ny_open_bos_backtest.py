@@ -33,10 +33,10 @@ as the conservative, path-unknown result.
 
 Examples
 --------
-    python3 us500-1900-first-swing-bos-test-runner.py --date 2026-09-04
-    python3 us500-1900-first-swing-bos-test-runner.py --month 2026-08
-    python3 us500-1900-first-swing-bos-test-runner.py --year 2026 --risk-aed 40
-    python3 us500-1900-first-swing-bos-test-runner.py --self-test
+    python3 us500_ny_open_bos_backtest.py --date 2026-09-04
+    python3 us500_ny_open_bos_backtest.py --month 2026-08
+    python3 us500_ny_open_bos_backtest.py --year 2026 --risk-aed 40
+    python3 us500_ny_open_bos_backtest.py --self-test
 
 Credentials are loaded from US500/.env (or inherited environment variables):
     CAPITAL_API_KEY

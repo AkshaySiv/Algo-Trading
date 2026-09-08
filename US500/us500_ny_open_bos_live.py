@@ -3,7 +3,7 @@
 
 This runner is deliberately fail-closed and **dry-run by default**. It uses the
 same 1-minute, 09:30 America/New_York first-swing BOS mechanics as
-``us500-1900-first-swing-bos-test-runner.py`` with the validated entry filter:
+``us500_ny_open_bos_backtest.py`` with the validated entry filter:
 
     abs(close_bid - open_bid) / (high_bid - low_bid) >= 0.75
 
@@ -51,7 +51,7 @@ from dotenv import load_dotenv
 from capitalcom_api import CapitalComAPI
 
 PROJECT_DIR = Path(__file__).resolve().parent
-SOURCE_RUNNER = PROJECT_DIR / "us500-1900-first-swing-bos-test-runner.py"
+SOURCE_RUNNER = PROJECT_DIR / "us500_ny_open_bos_backtest.py"
 STATE_DIR = PROJECT_DIR / "state"
 LOG_DIR = PROJECT_DIR / "logs"
 DEFAULT_STATE_PATH = STATE_DIR / "us500_ny_open_bos_body75_live_state.json"
