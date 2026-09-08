@@ -69,6 +69,7 @@ DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_MAX_ENTRY_SLIPPAGE_POINTS = 2.0
 RISK_PER_TRADE_AED = 40.0
 ORDER_EXECUTION_ENABLED = True
+SIGNAL_FRESHNESS_AFTER_CLOSE_SECONDS = 70
 POSITION_RECONCILIATION_RETRIES = 3
 RECONCILIATION_SLEEP_SECONDS = 0.75
 
@@ -227,6 +228,20 @@ def completed_bar_end(now_utc: datetime) -> datetime:
     """Return the last fully completed one-minute candle boundary in UTC."""
     floored = now_utc.astimezone(UTC).replace(second=0, microsecond=0)
     return floored - timedelta(minutes=1)
+
+
+def is_fresh_completed_signal(signal_bar_start: datetime, now_utc: datetime) -> bool:
+    """Return whether a completed BOS candle is within the execution window.
+
+    Capital.com timestamps a one-minute bar at its **start**. A BOS bar stamped
+    13:51:00 closes at 13:52:00, so the 70-second freshness allowance begins
+    at 13:52:00 rather than at the timestamp supplied by the price endpoint.
+    Measuring from the bar start would leave only 10 seconds after close and
+    could incorrectly discard a valid signal while the API is publishing it.
+    """
+    signal_closed_at = signal_bar_start + timedelta(minutes=1)
+    age_after_close = now_utc - signal_closed_at
+    return timedelta(0) <= age_after_close <= timedelta(seconds=SIGNAL_FRESHNESS_AFTER_CLOSE_SECONDS)
 
 
 def price_increment_from_market(market: dict[str, Any]) -> float:
@@ -799,12 +814,16 @@ def run_cycle(api: CapitalComAPI, state: dict[str, Any], constraints: BrokerCons
         )
         return state, False
 
-    # The signal minute must still be fresh. A delayed process may scan history,
-    # but must never enter a stale market order.
+    # The signal minute must still be fresh after its one-minute bar has CLOSED.
+    # A delayed process may scan history, but must never enter a stale market order.
     signal_time = parse_iso_utc(signal.signal_time_utc)
-    if now_utc - signal_time > timedelta(minutes=1, seconds=10):
+    signal_closed_at = signal_time + timedelta(minutes=1)
+    if not is_fresh_completed_signal(signal_time, now_utc):
         state["status"] = "DONE"
-        state["lock_reason"] = f"Qualified BOS at {signal.signal_time_utc} is stale; no late market entry"
+        state["lock_reason"] = (
+            f"Qualified BOS candle closed at {iso_utc(signal_closed_at)} is stale; "
+            "no late market entry"
+        )
         log.warning("[STALE] %s", state["lock_reason"])
         return state, False
 
@@ -870,6 +889,12 @@ def run_self_test() -> None:
     assert floor_size(1.239, 0.01) == 1.23
     size, risk, error = compute_size(10.0, 40.0, constraints)
     assert error is None and size is not None and risk <= 40.0
+
+    signal_bar_start = datetime(2026, 4, 10, 13, 51, tzinfo=UTC)
+    assert is_fresh_completed_signal(signal_bar_start, signal_bar_start + timedelta(minutes=1, seconds=5))
+    assert is_fresh_completed_signal(signal_bar_start, signal_bar_start + timedelta(minutes=2, seconds=10))
+    assert not is_fresh_completed_signal(signal_bar_start, signal_bar_start + timedelta(minutes=2, seconds=11))
+    assert not is_fresh_completed_signal(signal_bar_start, signal_bar_start + timedelta(seconds=59))
 
     logger = logging.getLogger("us500_self_test")
     old_config = {"risk_aed": 1.0, "mode": "DRY_RUN"}
