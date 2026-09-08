@@ -737,6 +737,37 @@ def runner_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def refresh_waiting_state_config(state: dict[str, Any], config: dict[str, Any], log: logging.Logger) -> None:
+    """Accept revised settings only before a session has recorded any trade decision.
+
+    A persisted ``WAITING`` state may be created before the operator settles on
+    the risk amount. Refreshing it is safe because no entry signal, order, or
+    position exists. Once the runner has recorded a trade, a skipped signal, a
+    completed session, or a lock, configuration drift remains a hard error so a
+    restart cannot alter the audit trail or revive a completed decision.
+    """
+    stored_config = state.get("config")
+    if stored_config == config:
+        return
+    safe_to_refresh = (
+        state.get("status") == "WAITING"
+        and not state.get("trade_taken", False)
+        and state.get("trade") is None
+        and state.get("signal") is None
+        and state.get("lock_reason") is None
+    )
+    if not safe_to_refresh:
+        raise RuntimeError(
+            "Runner configuration differs from persisted state after a session decision; "
+            "review the state file instead of changing risk or execution mode."
+        )
+    log.warning(
+        "[CONFIG] Refreshing unused waiting-state configuration: risk AED %s -> %s",
+        (stored_config or {}).get("risk_aed"), config.get("risk_aed"),
+    )
+    state["config"] = config
+
+
 def run_cycle(api: CapitalComAPI, state: dict[str, Any], args: argparse.Namespace,
               constraints: BrokerConstraints, log: logging.Logger) -> tuple[dict[str, Any], bool]:
     """Execute one deterministic lifecycle cycle; return state and stop flag."""
@@ -747,6 +778,9 @@ def run_cycle(api: CapitalComAPI, state: dict[str, Any], args: argparse.Namespac
     if state.get("status") == "LOCKED":
         log.critical("[LOCKED] %s", state.get("lock_reason") or "Manual review required")
         return state, True
+    if state.get("status") == "DONE":
+        log.info("[DONE] Session already completed: %s", state.get("lock_reason") or "trade or skip recorded")
+        return state, False
 
     assert_no_unmanaged_exposure(api, state)
 
@@ -870,6 +904,20 @@ def run_self_test() -> None:
     size, risk, error = compute_size(10.0, 40.0, constraints)
     assert error is None and size is not None and risk <= 40.0
 
+    logger = logging.getLogger("us500_self_test")
+    old_config = {"risk_aed": 1.0, "mode": "DRY_RUN"}
+    fresh_config = {"risk_aed": 40.0, "mode": "DRY_RUN"}
+    waiting_state = new_state(date(2026, 4, 10), old_config)
+    refresh_waiting_state_config(waiting_state, fresh_config, logger)
+    assert waiting_state["config"] == fresh_config
+    waiting_state["status"] = "DONE"
+    try:
+        refresh_waiting_state_config(waiting_state, {"risk_aed": 50.0, "mode": "DRY_RUN"}, logger)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Completed session accepted a configuration change")
+
     summer_start, summer_cutoff = session_window(date(2026, 8, 14))
     winter_start, winter_cutoff = session_window(date(2026, 1, 9))
     assert summer_start.astimezone(IST).hour == 19 and summer_cutoff.astimezone(IST).hour == 22
@@ -947,8 +995,7 @@ def main() -> None:
             while True:
                 now_utc = datetime.now(UTC)
                 state = reset_if_due(api, load_state(args.state_path), now_utc, args.execute, config, log)
-                if state.get("config") != config:
-                    raise RuntimeError("Runner configuration differs from persisted session state; use a new state path after review.")
+                refresh_waiting_state_config(state, config, log)
                 state, stop = run_cycle(api, state, args, constraints, log)
                 save_state(args.state_path, state)
                 if args.once or stop:
