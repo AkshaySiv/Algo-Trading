@@ -417,6 +417,54 @@ class CapitalComAPI:
     # WORKING ORDERS (Limit / Stop Orders)
     # ─────────────────────────────────────────────────────────────────────
 
+    def place_stop_order(self, epic: str, direction: str, size: float,
+                         level: float, stop_level: Optional[float] = None,
+                         profit_level: Optional[float] = None,
+                         good_till_date: Optional[str] = None,
+                         guaranteed_stop: bool = False) -> dict:
+        """Place a broker-hosted STOP working order with attached SL and TP.
+
+        ``level`` is the breakout trigger. Capital.com converts an accepted
+        STOP working order into a market position when that level is reached.
+        The optional ``good_till_date`` must be a UTC ``YYYY-MM-DDTHH:MM:SS``
+        timestamp and is used by live runners to prevent stale entry orders
+        surviving beyond a defined strategy session.
+
+        Returns a dict containing ``dealReference``. The caller must confirm
+        it with :meth:`confirm_deal` and reconcile it through
+        :meth:`get_working_orders` before treating the order as live.
+        """
+        self._ensure_session()
+        payload = {
+            "epic": epic,
+            "direction": direction.upper(),
+            "size": size,
+            "level": level,
+            "type": "STOP",
+            "guaranteedStop": guaranteed_stop,
+        }
+        if stop_level is not None:
+            payload["stopLevel"] = stop_level
+        if profit_level is not None:
+            payload["profitLevel"] = profit_level
+        if good_till_date is not None:
+            payload["goodTillDate"] = good_till_date
+
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/workingorders",
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            result = resp.json()
+            logger.info(
+                "STOP working order submitted: %s %s %s @ %s | dealRef=%s",
+                direction.upper(), size, epic, level, result.get("dealReference"),
+            )
+            return result
+        logger.error("STOP working order failed: %s — %s", resp.status_code, resp.text)
+        resp.raise_for_status()
+
     def place_limit_order(self, epic: str, direction: str, size: float,
                           level: float, stop_level: Optional[float] = None,
                           profit_level: Optional[float] = None) -> dict:
