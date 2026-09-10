@@ -1,0 +1,369 @@
+//@version=6
+indicator("Tradesharpe Setup 1 — 15m Session Breakout", overlay = true, max_labels_count = 500)
+
+// ============================================================================
+// PURPOSE
+// ============================================================================
+// A transparent, non-repainting approximation of the Setup 1 concept:
+// trade a confirmed 15-minute close out of an opening range/structure during a
+// chosen high-volume session. The script is a visual planning tool; it does not
+// place orders. One qualified BUY or SELL is allowed per enabled session.
+//
+// It deliberately uses explicit, configurable proxies for subjective parts of
+// the method (session bias, "major" levels, news/impulse avoidance, and the
+// amount of structure to wait for). Read the companion README before use.
+
+// ============================================================================
+// GENERAL SETTINGS
+// ============================================================================
+generalGroup = "1. General"
+tradeTimezone = input.string("Europe/London", "Session time zone", options = ["Europe/London", "Etc/UTC", "America/New_York", "Asia/Dubai", "Asia/Kolkata"], group = generalGroup, tooltip = "Session inputs are interpreted in this IANA time zone. Europe/London automatically handles UK daylight saving time.")
+showSessionShading = input.bool(true, "Shade enabled sessions", group = generalGroup)
+showMajorLevels = input.bool(true, "Plot confirmed 4H / Daily pivot levels", group = generalGroup)
+closeAtSessionEnd = input.bool(true, "Mark an open setup as closed at session end", group = generalGroup, tooltip = "Enabled by default so the indicator stays strictly one completed setup per session. Disable only if exits are managed manually; a still-open setup blocks the next same-session signal.")
+
+// ============================================================================
+// SESSIONS
+// ============================================================================
+sessionGroup = "2. Sessions — one signal maximum in each enabled session"
+enableFrankfurt = input.bool(false, "Enable Frankfurt", group = sessionGroup)
+frankfurtSession = input.session("0600-0800", "Frankfurt window", group = sessionGroup)
+enableLondon = input.bool(true, "Enable London", group = sessionGroup)
+londonSession = input.session("0800-1100", "London window", group = sessionGroup)
+enableNewYork = input.bool(true, "Enable New York", group = sessionGroup)
+newYorkSession = input.session("1330-1630", "New York window", group = sessionGroup, tooltip = "When using Europe/London, amend this window during the short March/October weeks when US and UK daylight-saving dates differ.")
+
+// ============================================================================
+// SETUP 1: RANGE, BREAKOUT, AND IMPULSE FILTERS
+// ============================================================================
+setupGroup = "3. Setup 1 — confirmed range breakout"
+rangeBarsRequired = input.int(4, "15m bars required to form the range", minval = 2, maxval = 16, group = setupGroup, tooltip = "The first N 15m bars build the range. A signal can occur only from the following bar, which forces a wait for structure.")
+atrLength = input.int(14, "ATR length", minval = 1, group = setupGroup)
+minRangeATR = input.float(0.25, "Minimum range size (ATR)", minval = 0.05, step = 0.05, group = setupGroup)
+maxRangeATR = input.float(1.50, "Maximum range size (ATR)", minval = 0.25, step = 0.05, group = setupGroup, tooltip = "Rejects an already-expanded initial range.")
+breakoutBufferATR = input.float(0.05, "Close-through-range buffer (ATR)", minval = 0.00, step = 0.01, group = setupGroup)
+minBodyFraction = input.float(0.50, "Minimum breakout body / candle range", minval = 0.10, maxval = 1.00, step = 0.05, group = setupGroup, tooltip = "Prevents a wick-only break from qualifying. A 0.50 setting requires the body to be at least 50% of the full candle range.")
+maxSignalBarATR = input.float(1.50, "Maximum breakout candle range (ATR)", minval = 0.25, step = 0.05, group = setupGroup, tooltip = "A transparent proxy for avoiding news-driven or abnormal impulse candles. It cannot identify scheduled news itself.")
+maxMoveFromSessionOpenATR = input.float(2.00, "Maximum move from session open (ATR)", minval = 0.25, step = 0.25, group = setupGroup, tooltip = "Rejects late/extended continuation attempts once price has already travelled too far from that session's opening price.")
+
+// ============================================================================
+// BIAS AND MAJOR-LEVEL FILTERS
+// ============================================================================
+filterGroup = "4. Bias and major-level filters"
+biasMode = input.string("Daily + 4H alignment", "Directional bias proxy", options = ["Off", "Previous Daily", "Daily + 4H alignment"], group = filterGroup, tooltip = "The original method's session bias is discretionary. This is a transparent candle-direction proxy, not a claim to reproduce discretionary bias exactly.")
+htfPivotLeft = input.int(3, "4H / Daily pivot left bars", minval = 1, maxval = 10, group = filterGroup)
+htfPivotRight = input.int(3, "4H / Daily pivot right bars", minval = 1, maxval = 10, group = filterGroup, tooltip = "A pivot becomes available only after this many completed right-side bars. That confirmation delay prevents future-data repainting.")
+useMajorLevelFilter = input.bool(true, "Require room before the next 4H / Daily barrier", group = filterGroup)
+majorLevelClearanceATR = input.float(0.10, "Clearance before major barrier (ATR)", minval = 0.00, step = 0.05, group = filterGroup, tooltip = "A long is rejected when its target would run into a confirmed 4H/Daily resistance; a short is rejected near confirmed support.")
+
+// ============================================================================
+// TRADE PLAN / EXIT DISPLAY
+// ============================================================================
+riskGroup = "5. Planned stop and target"
+stopBufferATR = input.float(0.10, "Stop buffer beyond range (ATR)", minval = 0.00, step = 0.05, group = riskGroup)
+riskReward = input.float(1.00, "Fixed target in R", minval = 0.25, step = 0.25, group = riskGroup, tooltip = "The source material emphasizes the next level, not a universal fixed R target. This is therefore a user-set planning target. The major-level filter rejects targets that run into a confirmed barrier.")
+showTradePlan = input.bool(true, "Plot active entry / stop / target", group = riskGroup)
+
+// ============================================================================
+// HELPER FUNCTIONS AND HIGHER-TIMEFRAME DATA
+// ============================================================================
+lastPivotHigh(_left, _right) =>
+    _pivot = ta.pivothigh(high, _left, _right)
+    ta.valuewhen(not na(_pivot), _pivot, 0)
+
+lastPivotLow(_left, _right) =>
+    _pivot = ta.pivotlow(low, _left, _right)
+    ta.valuewhen(not na(_pivot), _pivot, 0)
+
+atr = ta.atr(atrLength)
+is15m = timeframe.isminutes and timeframe.multiplier == 15
+
+[previousDailyOpen, previousDailyClose] = request.security(syminfo.tickerid, "D", [open[1], close[1]], lookahead = barmerge.lookahead_off)
+[previous4hOpen, previous4hClose] = request.security(syminfo.tickerid, "240", [open[1], close[1]], lookahead = barmerge.lookahead_off)
+[dailyResistance, dailySupport] = request.security(syminfo.tickerid, "D", [lastPivotHigh(htfPivotLeft, htfPivotRight), lastPivotLow(htfPivotLeft, htfPivotRight)], lookahead = barmerge.lookahead_off)
+[fourHourResistance, fourHourSupport] = request.security(syminfo.tickerid, "240", [lastPivotHigh(htfPivotLeft, htfPivotRight), lastPivotLow(htfPivotLeft, htfPivotRight)], lookahead = barmerge.lookahead_off)
+
+dailyBull = previousDailyClose > previousDailyOpen
+dailyBear = previousDailyClose < previousDailyOpen
+fourHourBull = previous4hClose > previous4hOpen
+fourHourBear = previous4hClose < previous4hOpen
+
+allowLongBias = biasMode == "Off" or (biasMode == "Previous Daily" and dailyBull) or (biasMode == "Daily + 4H alignment" and dailyBull and fourHourBull)
+allowShortBias = biasMode == "Off" or (biasMode == "Previous Daily" and dailyBear) or (biasMode == "Daily + 4H alignment" and dailyBear and fourHourBear)
+
+longBarrier = not na(dailyResistance) and dailyResistance > close ? dailyResistance : not na(fourHourResistance) and fourHourResistance > close ? fourHourResistance : na
+if not na(dailyResistance) and not na(fourHourResistance) and dailyResistance > close and fourHourResistance > close
+    longBarrier := math.min(dailyResistance, fourHourResistance)
+
+shortBarrier = not na(dailySupport) and dailySupport < close ? dailySupport : not na(fourHourSupport) and fourHourSupport < close ? fourHourSupport : na
+if not na(dailySupport) and not na(fourHourSupport) and dailySupport < close and fourHourSupport < close
+    shortBarrier := math.max(dailySupport, fourHourSupport)
+
+// ============================================================================
+// FRANKFURT SESSION ENGINE
+// ============================================================================
+frankfurtIn = enableFrankfurt and not na(time(timeframe.period, frankfurtSession, tradeTimezone))
+frankfurtStart = frankfurtIn and (bar_index == 0 or not frankfurtIn[1])
+frankfurtEnd = not frankfurtIn and bar_index > 0 and frankfurtIn[1]
+
+var float frankfurtRangeHigh = na
+var float frankfurtRangeLow = na
+var float frankfurtOpen = na
+var int frankfurtRangeBars = 0
+var bool frankfurtRangeLocked = false
+var bool frankfurtTaken = false
+var bool frankfurtTradeOpen = false
+var int frankfurtEntryBar = na
+var float frankfurtEntry = na
+var float frankfurtStop = na
+var float frankfurtTarget = na
+
+if frankfurtStart
+    frankfurtRangeHigh := high
+    frankfurtRangeLow := low
+    frankfurtOpen := open
+    frankfurtRangeBars := 1
+    frankfurtRangeLocked := false
+    frankfurtTaken := frankfurtTradeOpen ? true : false
+else if frankfurtIn and not frankfurtRangeLocked
+    frankfurtRangeBars += 1
+    frankfurtRangeHigh := math.max(frankfurtRangeHigh, high)
+    frankfurtRangeLow := math.min(frankfurtRangeLow, low)
+
+if frankfurtIn and not frankfurtRangeLocked and frankfurtRangeBars >= rangeBarsRequired
+    frankfurtRangeLocked := true
+
+if frankfurtTradeOpen and bar_index > frankfurtEntryBar
+    frankfurtIsLong = frankfurtTarget > frankfurtEntry
+    frankfurtStopHit = frankfurtIsLong ? low <= frankfurtStop : high >= frankfurtStop
+    frankfurtTargetHit = frankfurtIsLong ? high >= frankfurtTarget : low <= frankfurtTarget
+    if frankfurtStopHit or frankfurtTargetHit
+        frankfurtTradeOpen := false
+        frankfurtExitText = frankfurtStopHit and frankfurtTargetHit ? "FRANKFURT: both SL/TP touched — SL assumed" : frankfurtStopHit ? "FRANKFURT: SL" : "FRANKFURT: TP"
+        frankfurtExitY = frankfurtStopHit ? frankfurtStop : frankfurtTarget
+        label.new(bar_index, frankfurtExitY, frankfurtExitText, style = label.style_label_left, color = frankfurtStopHit ? color.new(color.red, 0) : color.new(color.green, 0), textcolor = color.white, size = size.tiny)
+
+if frankfurtEnd and frankfurtTradeOpen and closeAtSessionEnd
+    frankfurtTradeOpen := false
+    label.new(bar_index, close, "FRANKFURT: session close", style = label.style_label_left, color = color.new(color.gray, 0), textcolor = color.white, size = size.tiny)
+
+frankfurtRangeSize = frankfurtIn ? frankfurtRangeHigh - frankfurtRangeLow : na
+frankfurtRangeOK = frankfurtRangeSize >= atr * minRangeATR and frankfurtRangeSize <= atr * maxRangeATR
+frankfurtBodyFraction = (high - low) > 0 ? math.abs(close - open) / (high - low) : 0.0
+frankfurtImpulseOK = (high - low) <= atr * maxSignalBarATR and math.abs(close - frankfurtOpen) <= atr * maxMoveFromSessionOpenATR
+frankfurtLongStop = frankfurtRangeLow - atr * stopBufferATR
+frankfurtShortStop = frankfurtRangeHigh + atr * stopBufferATR
+frankfurtLongRisk = close - frankfurtLongStop
+frankfurtShortRisk = frankfurtShortStop - close
+frankfurtLongTarget = close + frankfurtLongRisk * riskReward
+frankfurtShortTarget = close - frankfurtShortRisk * riskReward
+frankfurtLongRoom = not useMajorLevelFilter or na(longBarrier) or frankfurtLongTarget < longBarrier - atr * majorLevelClearanceATR
+frankfurtShortRoom = not useMajorLevelFilter or na(shortBarrier) or frankfurtShortTarget > shortBarrier + atr * majorLevelClearanceATR
+frankfurtLongSignal = is15m and barstate.isconfirmed and frankfurtIn and frankfurtRangeLocked[1] and not frankfurtTaken and frankfurtRangeOK and frankfurtBodyFraction >= minBodyFraction and frankfurtImpulseOK and allowLongBias and close > frankfurtRangeHigh + atr * breakoutBufferATR and frankfurtLongRisk > syminfo.mintick and frankfurtLongRoom
+frankfurtShortSignal = is15m and barstate.isconfirmed and frankfurtIn and frankfurtRangeLocked[1] and not frankfurtTaken and frankfurtRangeOK and frankfurtBodyFraction >= minBodyFraction and frankfurtImpulseOK and allowShortBias and close < frankfurtRangeLow - atr * breakoutBufferATR and frankfurtShortRisk > syminfo.mintick and frankfurtShortRoom
+
+if frankfurtLongSignal or frankfurtShortSignal
+    frankfurtTaken := true
+    frankfurtTradeOpen := true
+    frankfurtEntryBar := bar_index
+    frankfurtEntry := close
+    frankfurtStop := frankfurtLongSignal ? frankfurtLongStop : frankfurtShortStop
+    frankfurtTarget := frankfurtLongSignal ? frankfurtLongTarget : frankfurtShortTarget
+    frankfurtSide = frankfurtLongSignal ? "BUY" : "SELL"
+    frankfurtLabelY = frankfurtLongSignal ? low : high
+    label.new(bar_index, frankfurtLabelY, "FRANKFURT " + frankfurtSide + "\nEntry " + str.tostring(frankfurtEntry, format.mintick) + " | SL " + str.tostring(frankfurtStop, format.mintick) + " | TP " + str.tostring(frankfurtTarget, format.mintick), style = frankfurtLongSignal ? label.style_label_up : label.style_label_down, color = frankfurtLongSignal ? color.new(color.lime, 0) : color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+// ============================================================================
+// LONDON SESSION ENGINE
+// ============================================================================
+londonIn = enableLondon and not na(time(timeframe.period, londonSession, tradeTimezone))
+londonStart = londonIn and (bar_index == 0 or not londonIn[1])
+londonEnd = not londonIn and bar_index > 0 and londonIn[1]
+
+var float londonRangeHigh = na
+var float londonRangeLow = na
+var float londonOpen = na
+var int londonRangeBars = 0
+var bool londonRangeLocked = false
+var bool londonTaken = false
+var bool londonTradeOpen = false
+var int londonEntryBar = na
+var float londonEntry = na
+var float londonStop = na
+var float londonTarget = na
+
+if londonStart
+    londonRangeHigh := high
+    londonRangeLow := low
+    londonOpen := open
+    londonRangeBars := 1
+    londonRangeLocked := false
+    londonTaken := londonTradeOpen ? true : false
+else if londonIn and not londonRangeLocked
+    londonRangeBars += 1
+    londonRangeHigh := math.max(londonRangeHigh, high)
+    londonRangeLow := math.min(londonRangeLow, low)
+
+if londonIn and not londonRangeLocked and londonRangeBars >= rangeBarsRequired
+    londonRangeLocked := true
+
+if londonTradeOpen and bar_index > londonEntryBar
+    londonIsLong = londonTarget > londonEntry
+    londonStopHit = londonIsLong ? low <= londonStop : high >= londonStop
+    londonTargetHit = londonIsLong ? high >= londonTarget : low <= londonTarget
+    if londonStopHit or londonTargetHit
+        londonTradeOpen := false
+        londonExitText = londonStopHit and londonTargetHit ? "LONDON: both SL/TP touched — SL assumed" : londonStopHit ? "LONDON: SL" : "LONDON: TP"
+        londonExitY = londonStopHit ? londonStop : londonTarget
+        label.new(bar_index, londonExitY, londonExitText, style = label.style_label_left, color = londonStopHit ? color.new(color.red, 0) : color.new(color.green, 0), textcolor = color.white, size = size.tiny)
+
+if londonEnd and londonTradeOpen and closeAtSessionEnd
+    londonTradeOpen := false
+    label.new(bar_index, close, "LONDON: session close", style = label.style_label_left, color = color.new(color.gray, 0), textcolor = color.white, size = size.tiny)
+
+londonRangeSize = londonIn ? londonRangeHigh - londonRangeLow : na
+londonRangeOK = londonRangeSize >= atr * minRangeATR and londonRangeSize <= atr * maxRangeATR
+londonBodyFraction = (high - low) > 0 ? math.abs(close - open) / (high - low) : 0.0
+londonImpulseOK = (high - low) <= atr * maxSignalBarATR and math.abs(close - londonOpen) <= atr * maxMoveFromSessionOpenATR
+londonLongStop = londonRangeLow - atr * stopBufferATR
+londonShortStop = londonRangeHigh + atr * stopBufferATR
+londonLongRisk = close - londonLongStop
+londonShortRisk = londonShortStop - close
+londonLongTarget = close + londonLongRisk * riskReward
+londonShortTarget = close - londonShortRisk * riskReward
+londonLongRoom = not useMajorLevelFilter or na(longBarrier) or londonLongTarget < longBarrier - atr * majorLevelClearanceATR
+londonShortRoom = not useMajorLevelFilter or na(shortBarrier) or londonShortTarget > shortBarrier + atr * majorLevelClearanceATR
+londonLongSignal = is15m and barstate.isconfirmed and londonIn and londonRangeLocked[1] and not londonTaken and londonRangeOK and londonBodyFraction >= minBodyFraction and londonImpulseOK and allowLongBias and close > londonRangeHigh + atr * breakoutBufferATR and londonLongRisk > syminfo.mintick and londonLongRoom
+londonShortSignal = is15m and barstate.isconfirmed and londonIn and londonRangeLocked[1] and not londonTaken and londonRangeOK and londonBodyFraction >= minBodyFraction and londonImpulseOK and allowShortBias and close < londonRangeLow - atr * breakoutBufferATR and londonShortRisk > syminfo.mintick and londonShortRoom
+
+if londonLongSignal or londonShortSignal
+    londonTaken := true
+    londonTradeOpen := true
+    londonEntryBar := bar_index
+    londonEntry := close
+    londonStop := londonLongSignal ? londonLongStop : londonShortStop
+    londonTarget := londonLongSignal ? londonLongTarget : londonShortTarget
+    londonSide = londonLongSignal ? "BUY" : "SELL"
+    londonLabelY = londonLongSignal ? low : high
+    label.new(bar_index, londonLabelY, "LONDON " + londonSide + "\nEntry " + str.tostring(londonEntry, format.mintick) + " | SL " + str.tostring(londonStop, format.mintick) + " | TP " + str.tostring(londonTarget, format.mintick), style = londonLongSignal ? label.style_label_up : label.style_label_down, color = londonLongSignal ? color.new(color.lime, 0) : color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+// ============================================================================
+// NEW YORK SESSION ENGINE
+// ============================================================================
+newYorkIn = enableNewYork and not na(time(timeframe.period, newYorkSession, tradeTimezone))
+newYorkStart = newYorkIn and (bar_index == 0 or not newYorkIn[1])
+newYorkEnd = not newYorkIn and bar_index > 0 and newYorkIn[1]
+
+var float newYorkRangeHigh = na
+var float newYorkRangeLow = na
+var float newYorkOpen = na
+var int newYorkRangeBars = 0
+var bool newYorkRangeLocked = false
+var bool newYorkTaken = false
+var bool newYorkTradeOpen = false
+var int newYorkEntryBar = na
+var float newYorkEntry = na
+var float newYorkStop = na
+var float newYorkTarget = na
+
+if newYorkStart
+    newYorkRangeHigh := high
+    newYorkRangeLow := low
+    newYorkOpen := open
+    newYorkRangeBars := 1
+    newYorkRangeLocked := false
+    newYorkTaken := newYorkTradeOpen ? true : false
+else if newYorkIn and not newYorkRangeLocked
+    newYorkRangeBars += 1
+    newYorkRangeHigh := math.max(newYorkRangeHigh, high)
+    newYorkRangeLow := math.min(newYorkRangeLow, low)
+
+if newYorkIn and not newYorkRangeLocked and newYorkRangeBars >= rangeBarsRequired
+    newYorkRangeLocked := true
+
+if newYorkTradeOpen and bar_index > newYorkEntryBar
+    newYorkIsLong = newYorkTarget > newYorkEntry
+    newYorkStopHit = newYorkIsLong ? low <= newYorkStop : high >= newYorkStop
+    newYorkTargetHit = newYorkIsLong ? high >= newYorkTarget : low <= newYorkTarget
+    if newYorkStopHit or newYorkTargetHit
+        newYorkTradeOpen := false
+        newYorkExitText = newYorkStopHit and newYorkTargetHit ? "NEW YORK: both SL/TP touched — SL assumed" : newYorkStopHit ? "NEW YORK: SL" : "NEW YORK: TP"
+        newYorkExitY = newYorkStopHit ? newYorkStop : newYorkTarget
+        label.new(bar_index, newYorkExitY, newYorkExitText, style = label.style_label_left, color = newYorkStopHit ? color.new(color.red, 0) : color.new(color.green, 0), textcolor = color.white, size = size.tiny)
+
+if newYorkEnd and newYorkTradeOpen and closeAtSessionEnd
+    newYorkTradeOpen := false
+    label.new(bar_index, close, "NEW YORK: session close", style = label.style_label_left, color = color.new(color.gray, 0), textcolor = color.white, size = size.tiny)
+
+newYorkRangeSize = newYorkIn ? newYorkRangeHigh - newYorkRangeLow : na
+newYorkRangeOK = newYorkRangeSize >= atr * minRangeATR and newYorkRangeSize <= atr * maxRangeATR
+newYorkBodyFraction = (high - low) > 0 ? math.abs(close - open) / (high - low) : 0.0
+newYorkImpulseOK = (high - low) <= atr * maxSignalBarATR and math.abs(close - newYorkOpen) <= atr * maxMoveFromSessionOpenATR
+newYorkLongStop = newYorkRangeLow - atr * stopBufferATR
+newYorkShortStop = newYorkRangeHigh + atr * stopBufferATR
+newYorkLongRisk = close - newYorkLongStop
+newYorkShortRisk = newYorkShortStop - close
+newYorkLongTarget = close + newYorkLongRisk * riskReward
+newYorkShortTarget = close - newYorkShortRisk * riskReward
+newYorkLongRoom = not useMajorLevelFilter or na(longBarrier) or newYorkLongTarget < longBarrier - atr * majorLevelClearanceATR
+newYorkShortRoom = not useMajorLevelFilter or na(shortBarrier) or newYorkShortTarget > shortBarrier + atr * majorLevelClearanceATR
+newYorkLongSignal = is15m and barstate.isconfirmed and newYorkIn and newYorkRangeLocked[1] and not newYorkTaken and newYorkRangeOK and newYorkBodyFraction >= minBodyFraction and newYorkImpulseOK and allowLongBias and close > newYorkRangeHigh + atr * breakoutBufferATR and newYorkLongRisk > syminfo.mintick and newYorkLongRoom
+newYorkShortSignal = is15m and barstate.isconfirmed and newYorkIn and newYorkRangeLocked[1] and not newYorkTaken and newYorkRangeOK and newYorkBodyFraction >= minBodyFraction and newYorkImpulseOK and allowShortBias and close < newYorkRangeLow - atr * breakoutBufferATR and newYorkShortRisk > syminfo.mintick and newYorkShortRoom
+
+if newYorkLongSignal or newYorkShortSignal
+    newYorkTaken := true
+    newYorkTradeOpen := true
+    newYorkEntryBar := bar_index
+    newYorkEntry := close
+    newYorkStop := newYorkLongSignal ? newYorkLongStop : newYorkShortStop
+    newYorkTarget := newYorkLongSignal ? newYorkLongTarget : newYorkShortTarget
+    newYorkSide = newYorkLongSignal ? "BUY" : "SELL"
+    newYorkLabelY = newYorkLongSignal ? low : high
+    label.new(bar_index, newYorkLabelY, "NEW YORK " + newYorkSide + "\nEntry " + str.tostring(newYorkEntry, format.mintick) + " | SL " + str.tostring(newYorkStop, format.mintick) + " | TP " + str.tostring(newYorkTarget, format.mintick), style = newYorkLongSignal ? label.style_label_up : label.style_label_down, color = newYorkLongSignal ? color.new(color.lime, 0) : color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+frankfurtHighPlot = plot(frankfurtIn and frankfurtRangeLocked ? frankfurtRangeHigh : na, "Frankfurt range high", color = color.new(color.orange, 0), style = plot.style_linebr, linewidth = 1)
+frankfurtLowPlot = plot(frankfurtIn and frankfurtRangeLocked ? frankfurtRangeLow : na, "Frankfurt range low", color = color.new(color.orange, 0), style = plot.style_linebr, linewidth = 1)
+fill(frankfurtHighPlot, frankfurtLowPlot, color = color.new(color.orange, 92), title = "Frankfurt structure range")
+
+londonHighPlot = plot(londonIn and londonRangeLocked ? londonRangeHigh : na, "London range high", color = color.new(color.aqua, 0), style = plot.style_linebr, linewidth = 1)
+londonLowPlot = plot(londonIn and londonRangeLocked ? londonRangeLow : na, "London range low", color = color.new(color.aqua, 0), style = plot.style_linebr, linewidth = 1)
+fill(londonHighPlot, londonLowPlot, color = color.new(color.aqua, 92), title = "London structure range")
+
+newYorkHighPlot = plot(newYorkIn and newYorkRangeLocked ? newYorkRangeHigh : na, "New York range high", color = color.new(color.fuchsia, 0), style = plot.style_linebr, linewidth = 1)
+newYorkLowPlot = plot(newYorkIn and newYorkRangeLocked ? newYorkRangeLow : na, "New York range low", color = color.new(color.fuchsia, 0), style = plot.style_linebr, linewidth = 1)
+fill(newYorkHighPlot, newYorkLowPlot, color = color.new(color.fuchsia, 92), title = "New York structure range")
+
+plot(showMajorLevels ? fourHourResistance : na, "Confirmed 4H resistance", color = color.new(color.red, 45), style = plot.style_stepline, linewidth = 1)
+plot(showMajorLevels ? fourHourSupport : na, "Confirmed 4H support", color = color.new(color.green, 45), style = plot.style_stepline, linewidth = 1)
+plot(showMajorLevels ? dailyResistance : na, "Confirmed Daily resistance", color = color.new(color.red, 10), style = plot.style_stepline, linewidth = 2)
+plot(showMajorLevels ? dailySupport : na, "Confirmed Daily support", color = color.new(color.green, 10), style = plot.style_stepline, linewidth = 2)
+
+plot(showTradePlan and frankfurtTradeOpen ? frankfurtEntry : na, "Frankfurt active entry", color = color.new(color.yellow, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and frankfurtTradeOpen ? frankfurtStop : na, "Frankfurt active stop", color = color.new(color.red, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and frankfurtTradeOpen ? frankfurtTarget : na, "Frankfurt active target", color = color.new(color.lime, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and londonTradeOpen ? londonEntry : na, "London active entry", color = color.new(color.yellow, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and londonTradeOpen ? londonStop : na, "London active stop", color = color.new(color.red, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and londonTradeOpen ? londonTarget : na, "London active target", color = color.new(color.lime, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and newYorkTradeOpen ? newYorkEntry : na, "New York active entry", color = color.new(color.yellow, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and newYorkTradeOpen ? newYorkStop : na, "New York active stop", color = color.new(color.red, 0), style = plot.style_linebr, linewidth = 2)
+plot(showTradePlan and newYorkTradeOpen ? newYorkTarget : na, "New York active target", color = color.new(color.lime, 0), style = plot.style_linebr, linewidth = 2)
+
+sessionShade = frankfurtIn ? color.new(color.orange, 94) : londonIn ? color.new(color.aqua, 94) : newYorkIn ? color.new(color.fuchsia, 94) : na
+bgcolor(showSessionShading ? sessionShade : na)
+
+plotshape(frankfurtLongSignal or londonLongSignal or newYorkLongSignal, title = "Potential BUY", style = shape.triangleup, location = location.belowbar, color = color.lime, size = size.tiny, text = "BUY")
+plotshape(frankfurtShortSignal or londonShortSignal or newYorkShortSignal, title = "Potential SELL", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.tiny, text = "SELL")
+plotchar(not is15m, title = "Use a 15m chart", char = "!", location = location.top, color = color.yellow, size = size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(frankfurtLongSignal, "Setup 1 Frankfurt BUY", "Setup 1 potential Frankfurt BUY: confirmed 15m range breakout passed the configured filters.")
+alertcondition(frankfurtShortSignal, "Setup 1 Frankfurt SELL", "Setup 1 potential Frankfurt SELL: confirmed 15m range breakout passed the configured filters.")
+alertcondition(londonLongSignal, "Setup 1 London BUY", "Setup 1 potential London BUY: confirmed 15m range breakout passed the configured filters.")
+alertcondition(londonShortSignal, "Setup 1 London SELL", "Setup 1 potential London SELL: confirmed 15m range breakout passed the configured filters.")
+alertcondition(newYorkLongSignal, "Setup 1 New York BUY", "Setup 1 potential New York BUY: confirmed 15m range breakout passed the configured filters.")
+alertcondition(newYorkShortSignal, "Setup 1 New York SELL", "Setup 1 potential New York SELL: confirmed 15m range breakout passed the configured filters.")
